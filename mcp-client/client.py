@@ -5,8 +5,11 @@ from contextlib import AsyncExitStack
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from anthropic import Anthropic
+from openai import OpenAI
 from dotenv import load_dotenv
+import os
+import sys
+import json
 
 load_dotenv()  # load environment variables from .env
 
@@ -15,7 +18,10 @@ class MCPClient:
         # Initialize session and client objects
         self.session: Optional[ClientSession] = None
         self.exit_stack = AsyncExitStack()
-        self.anthropic = Anthropic()
+        self.openrouter = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=os.getenv("OPENROUTER_API_KEY"),
+            )
     # methods will go here
 
     async def connect_to_server(self, server_script_path: str):
@@ -48,7 +54,7 @@ class MCPClient:
         print("\nConnected to server with tools:", [tool.name for tool in tools])
 
     async def process_query(self, query: str) -> str:
-        """Process a query using Claude and available tools"""
+        """Process a query using OpenRouter and available tools"""
         messages = [
             {
                 "role": "user",
@@ -58,60 +64,65 @@ class MCPClient:
 
         response = await self.session.list_tools()
         available_tools = [{
-            "name": tool.name,
-            "description": tool.description,
-            "input_schema": tool.inputSchema
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.inputSchema
+            }
         } for tool in response.tools]
 
-        # Initial Claude API call
-        response = self.anthropic.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1000,
+
+        first_response = self.openrouter.chat.completions.create(
+            model="anthropic/claude-3.5-sonnet",
             messages=messages,
-            tools=available_tools
+            tools=available_tools,
         )
 
-        # Process response and handle tool calls
-        final_text = []
+        message = first_response.choices[0].message
 
-        assistant_message_content = []
-        for content in response.content:
-            if content.type == 'text':
-                final_text.append(content.text)
-                assistant_message_content.append(content)
-            elif content.type == 'tool_use':
-                tool_name = content.name
-                tool_args = content.input
+        if message.content:
+            final_text = [message.content]
+        else:
+            final_text = []
 
-                # Execute tool call
-                result = await self.session.call_tool(tool_name, tool_args)
-                final_text.append(f"[Calling tool {tool_name} with args {tool_args}]")
-
-                assistant_message_content.append(content)
-                messages.append({
-                    "role": "assistant",
-                    "content": assistant_message_content
-                })
-                messages.append({
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": content.id,
-                            "content": result.content
+        if message.tool_calls:
+            messages.append({
+                "role": "assistant",
+                "content": message.content or "",
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments
                         }
-                    ]
+                    }
+                    for tc in message.tool_calls
+                ]
+            })
+
+            for tc in message.tool_calls:
+                tool_name = tc.function.name
+                tool_args = json.loads(tc.function.arguments)
+
+                result = await self.session.call_tool(tool_name, tool_args)
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": str(result.content)
                 })
 
-                # Get next response from Claude
-                response = self.anthropic.messages.create(
-                    model="claude-sonnet-4-20250514",
-                    max_tokens=1000,
-                    messages=messages,
-                    tools=available_tools
-                )
+            second_response = self.openrouter.chat.completions.create(
+                model="anthropic/claude-3.5-sonnet",
+                messages=messages,
+                tools=available_tools,
+            )
 
-                final_text.append(response.content[0].text)
+            if second_response.choices[0].message.content:
+                final_text.append(second_response.choices[0].message.content)
 
         return "\n".join(final_text)
 
@@ -140,7 +151,7 @@ class MCPClient:
 
 async def main():
     if len(sys.argv) < 2:
-        print("Usage: python client.py /Users/libingze/Desktop/ICP1/weather/weather.py")
+        print("Usage: python client.py ../weather/weather.py")
         sys.exit(1)
 
     client = MCPClient()
@@ -151,5 +162,4 @@ async def main():
         await client.cleanup()
 
 if __name__ == "__main__":
-    import sys
     asyncio.run(main())
