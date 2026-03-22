@@ -55,12 +55,15 @@ class MCPClient:
 
     async def process_query(self, query: str) -> str:
         """Process a query using OpenRouter and available tools"""
-        messages = [
-            {
-                "role": "user",
-                "content": query
-            }
-        ]
+
+        prompt_result = await self.session.get_prompt("bing_weather_style")
+
+        messages = []
+        for m in prompt_result.messages:
+            if hasattr(m.content, "text"):
+                messages.append({"role": m.role, "content": m.content.text})
+
+        messages.append({"role": "user", "content": query})
 
         response = await self.session.list_tools()
         available_tools = [{
@@ -71,7 +74,6 @@ class MCPClient:
                 "parameters": tool.inputSchema
             }
         } for tool in response.tools]
-
 
         first_response = self.openrouter.chat.completions.create(
             model="anthropic/claude-3.5-sonnet",
