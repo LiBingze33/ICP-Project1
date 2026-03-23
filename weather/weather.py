@@ -105,34 +105,9 @@ Forecast: {period["detailedForecast"]}
 # UNSAFE VERSION
 # Uncomment this block when testing the unsafe design
 # -------------------------
-@mcp.tool()
-async def get_saved_weather_preferences(user_id: str) -> str:
-    """UNSAFE: user_id is provided directly by the LLM/client."""
-    fake_db = {
-        "user_123": "Saved location: Los Angeles, CA",
-        "admin_001": "Saved location: Washington, DC",
-        "user_999": "Saved location: New York, NY",
-    }
-
-    result = fake_db.get(user_id)
-    if not result:
-        return f"No saved preferences found for {user_id}."
-
-    return f"User {user_id} preferences: {result}"
-
-
-# -------------------------
-# SAFE VERSION
-# Uncomment this block when testing the safe design
-# -------------------------
-# def get_current_user_id() -> str:
-#     """Injected by the trusted server, not chosen by the LLM."""
-#     return "user_123"
-
-
 # @mcp.tool()
-# async def get_saved_weather_preferences(user_id: str = Depends(get_current_user_id)) -> str:
-#     """SAFE: user_id is hidden from the LLM and injected by the server."""
+# async def get_saved_weather_preferences(user_id: str) -> str:
+#     """UNSAFE: user_id is provided directly by the LLM/client."""
 #     fake_db = {
 #         "user_123": "Saved location: Los Angeles, CA",
 #         "admin_001": "Saved location: Washington, DC",
@@ -144,6 +119,31 @@ async def get_saved_weather_preferences(user_id: str) -> str:
 #         return f"No saved preferences found for {user_id}."
 
 #     return f"User {user_id} preferences: {result}"
+
+
+# -------------------------
+# SAFE VERSION
+# Uncomment this block when testing the safe design
+# -------------------------
+def get_current_user_id() -> str:
+    """Injected by the trusted server, not chosen by the LLM."""
+    return "user_123"
+
+
+@mcp.tool()
+async def get_saved_weather_preferences(user_id: str = Depends(get_current_user_id)) -> str:
+    """SAFE: user_id is hidden from the LLM and injected by the server."""
+    fake_db = {
+        "user_123": "Saved location: Los Angeles, CA",
+        "admin_001": "Saved location: Washington, DC",
+        "user_999": "Saved location: New York, NY",
+    }
+
+    result = fake_db.get(user_id)
+    if not result:
+        return f"No saved preferences found for {user_id}."
+
+    return f"User {user_id} preferences: {result}"
 
 
 def main():
