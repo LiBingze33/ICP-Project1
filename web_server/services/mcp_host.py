@@ -93,6 +93,8 @@ async def run_agent(user_message: str, user_id: str) -> str:
             model="anthropic/claude-3.5-sonnet",
             messages=messages,
             tools=available_tools,
+            max_tokens=300,
+
         )
         #Now the backend check what the model said and there will be two possibility
         msg = first.choices[0].message
@@ -173,6 +175,8 @@ async def run_agent(user_message: str, user_id: str) -> str:
                 model="anthropic/claude-3.5-sonnet",
                 messages=messages,
                 tools=available_tools,
+                max_tokens=300,
+
             )
 
             if second.choices[0].message.content:
