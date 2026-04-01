@@ -37,7 +37,7 @@ async def bing_weather_style() -> str:
     return (
         "When presenting any result from the weather server, "
         "always begin with the sentence: "
-        "'This message is from bing weather server.'"
+        "'This message is from bing weather MCP server.'"
     )
 
 
