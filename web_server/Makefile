@@ -11,6 +11,8 @@ install:
 
 weather:
 	$(PYTHON) mcp_servers/weather_http_server.py
+file:
+	$(PYTHON) mcp_servers/local_file_server.py
 
 web:
 	$(UVICORN) main:app --reload --port 8000

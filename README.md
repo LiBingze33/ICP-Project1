@@ -68,3 +68,6 @@ A typical `.gitignore` file should include:
 venv/
 __pycache__/
 *.pyc
+
+A another way to save save the APi token is 
+source ~/.zshrc            # as your local variable

@@ -8,8 +8,8 @@ from openai import OpenAI
 
 load_dotenv()
 
-MCP_URL = "http://127.0.0.1:9000/mcp"
-
+WEATHER_MCP_URL = "http://127.0.0.1:9000/mcp"
+FILE_MCP_URL = "http://127.0.0.1:9001/mcp"
 llm_client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY"),
@@ -30,11 +30,32 @@ def extract_tool_text(tool_result) -> str:
 
 
 
+# async def run_agent(user_message: str, user_id: str) -> str:
+#     #connect to the MCP server at MCP_URL
+#     #send the user identity in the header
+#     transport = StreamableHttpTransport(
+#         url=MCP_URL,
+#         headers={
+#             "X-User-Id": user_id,
+#         },
+#     )
+def choose_server(user_message: str) -> tuple[str, str, set[str]]:
+    text = user_message.lower()
+
+    if "file" in text or "read" in text or ".txt" in text or ".md" in text:
+        return FILE_MCP_URL, "file_style", {"list_files", "read_file","create_file","delete_file"}
+
+    return WEATHER_MCP_URL, "bing_weather_style", {
+        "get_alerts",
+        "get_forecast",
+        "get_saved_weather_preferences",
+    }
+
 async def run_agent(user_message: str, user_id: str) -> str:
-    #connect to the MCP server at MCP_URL
-    #send the user identity in the header
+    mcp_url, prompt_name, allowed_tools = choose_server(user_message)
+
     transport = StreamableHttpTransport(
-        url=MCP_URL,
+        url=mcp_url,
         headers={
             "X-User-Id": user_id,
         },
@@ -43,7 +64,7 @@ async def run_agent(user_message: str, user_id: str) -> str:
     async with Client(transport) as mcp_client:
         # Now the backendd can actuallyy talk to the MCP server
         # 1. Get prompt from MCP server
-        prompt_result = await mcp_client.get_prompt("bing_weather_style")
+        prompt_result = await mcp_client.get_prompt(prompt_name)
         #build the initial messages list
         messages = []
         for m in prompt_result.messages:
@@ -71,26 +92,27 @@ async def run_agent(user_message: str, user_id: str) -> str:
             #     }
             # ]
 
-        # 3. Get available tools from MCP server
+     # 3. Get available tools from MCP server
         tools_result = await mcp_client.list_tools()
 
         available_tools = []
         for tool in tools_result:
-            available_tools.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": tool.name,
-                        "description": tool.description or "",
-                        "parameters": tool.inputSchema,
-                    },
-                }
-            )
+            if tool.name in allowed_tools:
+                available_tools.append(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": tool.description or "",
+                            "parameters": tool.inputSchema,#this will allow LLM to understand what parameters the tool will need and pay attention to the input from the user
+                        },
+                    }
+                )
 
         # 4. First LLM call
         #Model will be able to see the prompt, the user question and the list of available tools
         first = llm_client.chat.completions.create(
-            model="anthropic/claude-3.5-sonnet",
+            model="anthropic/claude-sonnet-4.5",
             messages=messages,
             tools=available_tools,
             max_tokens=300,
@@ -124,21 +146,17 @@ async def run_agent(user_message: str, user_id: str) -> str:
                 }
             )
             #This could be important to add in the report, even if the model ask for a weird tool, only these three are allowed
-            allowed_tools = {
-                "get_alerts",
-                "get_forecast",
-                "get_saved_weather_preferences",
-            }
             for tc in msg.tool_calls:
-                #get tool name
+            # get tool name
                 tool_name = tc.function.name
-            #BLOCK not allowed tools
+
+                # BLOCK not allowed tools
                 if tool_name not in allowed_tools:
                     raise ValueError(f"Tool not allowed: {tool_name}")
-            #parse the tool arguments
+
+                # parse the tool arguments
                 tool_args = json.loads(tc.function.arguments or "{}")
-            #if the model requested
-            # {"state":"CA"} -> {"state":"CA"}
+
                 # validate input
                 if tool_name == "get_alerts":
                     state = tool_args.get("state", "")
@@ -150,15 +168,18 @@ async def run_agent(user_message: str, user_id: str) -> str:
                     lon = tool_args.get("longitude")
                     if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
                         raise ValueError("Invalid coordinates.")
-                #call the MCP tool, backend really ask the MCP server to execute the tool
+
+                if tool_name == "read_file":
+                    filename = tool_args.get("filename", "")
+                    if not isinstance(filename, str) or not filename.strip():
+                        raise ValueError("Invalid filename.")
+
+                # call the MCP tool
                 tool_result = await mcp_client.call_tool(tool_name, tool_args)
-                #convert the tool result into plain text
+
+                # convert the tool result into plain text
                 tool_text = extract_tool_text(tool_result)
-                #Now the conversation contains
-                #system prompt
-                #user message
-                #assistant tool request
-                #tool result
+
                 messages.append(
                     {
                         "role": "tool",
@@ -172,7 +193,7 @@ async def run_agent(user_message: str, user_id: str) -> str:
             #The first model could not answer fully, as the tool had not run yet
             #things like here is the tooloutput, turn into a final user-facing answer
             second = llm_client.chat.completions.create(
-                model="anthropic/claude-3.5-sonnet",
+                model="anthropic/claude-sonnet-4.5",
                 messages=messages,
                 tools=available_tools,
                 max_tokens=300,
