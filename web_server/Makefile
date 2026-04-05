@@ -20,4 +20,5 @@ web:
 all:
 	@echo "Run these in separate terminals:"
 	@echo "make weather"
+	@echo "make file"
 	@echo "make web"

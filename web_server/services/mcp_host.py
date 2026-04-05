@@ -187,7 +187,7 @@ async def run_agent(user_message: str, user_id: str) -> str:
                         "content": tool_text,
                     }
                 )
-                #now the model can see : the tool result is Los Angeles, CA
+                #now the model can see for example : the tool result is Los Angeles, CA
             # 6. Second LLM call with tool results
             #Now the model will have the tool result
             #The first model could not answer fully, as the tool had not run yet
