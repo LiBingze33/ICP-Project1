@@ -14,7 +14,9 @@ if not GITHUB_CLIENT_ID or not GITHUB_CLIENT_SECRET:
 auth = GitHubProvider(
     client_id=GITHUB_CLIENT_ID,
     client_secret=GITHUB_CLIENT_SECRET,
+    #Must meet the OAuth App configuration
     base_url="http://127.0.0.1:9000",
+    #default path redirect_path="/auth/callback"
 )
 mcp = FastMCP("weather",auth = auth)
 

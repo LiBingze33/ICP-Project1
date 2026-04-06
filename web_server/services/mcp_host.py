@@ -1,12 +1,26 @@
 import json
 import os
-
 from dotenv import load_dotenv
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
 from openai import OpenAI
+from fastmcp.client.auth import OAuth
+from key_value.aio.stores.disk import DiskStore
+from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
+from cryptography.fernet import Fernet
 
 load_dotenv()
+OAUTH_STORAGE_KEY = os.getenv("OAUTH_STORAGE_ENCRYPTION_KEY")
+
+if not OAUTH_STORAGE_KEY:
+    raise ValueError("Missing OAUTH_STORAGE_ENCRYPTION_KEY in environment.")
+#Create encrypted disk storage
+encrypted_storage = FernetEncryptionWrapper(
+    key_value=DiskStore(directory="./oauth_tokens"),
+    fernet=Fernet(OAUTH_STORAGE_KEY)
+)
+
+weather_oauth = OAuth(token_storage=encrypted_storage)
 
 WEATHER_MCP_URL = "http://127.0.0.1:9000/mcp"
 FILE_MCP_URL = "http://127.0.0.1:9001/mcp"
@@ -53,7 +67,7 @@ def choose_server(user_message: str) -> tuple[str, str, set[str]]:
 async def run_agent(user_message: str, user_id: str) -> str:
     mcp_url, prompt_name, allowed_tools = choose_server(user_message)
     if mcp_url == WEATHER_MCP_URL:
-        mcp_client_cm = Client(mcp_url, auth="oauth")   
+        mcp_client_cm = Client(mcp_url, auth=weather_oauth)   
     else:
         transport = StreamableHttpTransport(
         url=mcp_url,
