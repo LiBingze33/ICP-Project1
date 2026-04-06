@@ -48,20 +48,23 @@ def choose_server(user_message: str) -> tuple[str, str, set[str]]:
     return WEATHER_MCP_URL, "bing_weather_style", {
         "get_alerts",
         "get_forecast",
-        "get_saved_weather_preferences",
     }
 
 async def run_agent(user_message: str, user_id: str) -> str:
     mcp_url, prompt_name, allowed_tools = choose_server(user_message)
-
-    transport = StreamableHttpTransport(
+    if mcp_url == WEATHER_MCP_URL:
+        mcp_client_cm = Client(mcp_url, auth="oauth")   
+    else:
+        transport = StreamableHttpTransport(
         url=mcp_url,
         headers={
             "X-User-Id": user_id,
         },
     )
+        mcp_client_cm = Client(transport)
+
     #Open the MCP clint cconnection
-    async with Client(transport) as mcp_client:
+    async with mcp_client_cm as mcp_client:
         # Now the backendd can actuallyy talk to the MCP server
         # 1. Get prompt from MCP server
         prompt_result = await mcp_client.get_prompt(prompt_name)
@@ -204,3 +207,4 @@ async def run_agent(user_message: str, user_id: str) -> str:
                 final_parts.append(second.choices[0].message.content)
 
         return "\n".join(part for part in final_parts if part).strip()
+    

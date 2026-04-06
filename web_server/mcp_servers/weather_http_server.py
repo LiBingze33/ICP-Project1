@@ -1,10 +1,22 @@
 from typing import Any
-
-import httpx
+import httpx, os
+from dotenv import load_dotenv
 from fastmcp import FastMCP
-from fastmcp.dependencies import Depends, CurrentHeaders
+# from fastmcp.dependencies import Depends, CurrentHeaders
+from fastmcp.server.auth.providers.github import GitHubProvider
 
-mcp = FastMCP("weather")
+load_dotenv()
+GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")
+GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
+#Checking the variable is loaded
+if not GITHUB_CLIENT_ID or not GITHUB_CLIENT_SECRET:
+    raise ValueError("Missing GITHUB_CLIENT_ID or GITHUB_CLIENT_SECRET in environment.")
+auth = GitHubProvider(
+    client_id=GITHUB_CLIENT_ID,
+    client_secret=GITHUB_CLIENT_SECRET,
+    base_url="http://127.0.0.1:9000",
+)
+mcp = FastMCP("weather",auth = auth)
 
 NWS_API_BASE = "https://api.weather.gov"
 USER_AGENT = "weather-app/1.0"
@@ -96,25 +108,25 @@ async def get_forecast(latitude: float, longitude: float) -> str:
     return "\n---\n".join(forecasts)
 
 
-def get_current_user_id(headers: dict[str, str] = Depends(CurrentHeaders())) -> str:
-    user_id = headers.get("x-user-id", "user_123")
-    return user_id
+# def get_current_user_id(headers: dict[str, str] = Depends(CurrentHeaders())) -> str:
+#     user_id = headers.get("x-user-id", "user_123")
+#     return user_id
 
 
-@mcp.tool()
-async def get_saved_weather_preferences(user_id: str = Depends(get_current_user_id)) -> str:
-    """SAFE: user_id is injected by the server, not chosen by the LLM."""
-    fake_db = {
-        "user_123": "Saved location: Los Angeles, CA",
-        "admin_001": "Saved location: Washington, DC",
-        "user_999": "Saved location: New York, NY",
-    }
+# @mcp.tool()
+# async def get_saved_weather_preferences(user_id: str = Depends(get_current_user_id)) -> str:
+#     """SAFE: user_id is injected by the server, not chosen by the LLM."""
+#     fake_db = {
+#         "user_123": "Saved location: Los Angeles, CA",
+#         "admin_001": "Saved location: Washington, DC",
+#         "user_999": "Saved location: New York, NY",
+#     }
 
-    result = fake_db.get(user_id)
-    if not result:
-        return f"No saved preferences found for {user_id}."
+#     result = fake_db.get(user_id)
+#     if not result:
+#         return f"No saved preferences found for {user_id}."
 
-    return f"User {user_id} preferences: {result}"
+#     return f"User {user_id} preferences: {result}"
 
 
 if __name__ == "__main__":
