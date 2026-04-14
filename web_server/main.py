@@ -22,7 +22,7 @@ async def home(req: Request):
 async def chat(req: ChatRequest):
     try:
         # temporary demo identity
-        user_id = "user_123"
+        # user_id = "user_123"
 
         reply = await run_agent(req.message, user_id)
         return {"reply": reply}
