@@ -24,7 +24,7 @@ async def chat(req: ChatRequest):
         # temporary demo identity
         # user_id = "user_123"
 
-        reply = await run_agent(req.message, user_id)
+        reply = await run_agent(req.message)
         return {"reply": reply}
     except Exception as e:
         return {"error": str(e)}

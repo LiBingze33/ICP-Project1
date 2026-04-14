@@ -66,7 +66,7 @@ def choose_context(user_message: str) -> tuple[str, set[str]]:
     }
 
 
-async def run_agent(user_message: str, user_id: str) -> str:
+async def run_agent(user_message: str) -> str:
     # user_id is kept for compatibility with your current route,
     # but OAuth now handles identity at the MCP server side.
     prompt_name, allowed_tools = choose_context(user_message)
