@@ -5,8 +5,6 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 #store the database in a file called app.db
 #place it in the current project folder
 
-"""  """
-
 engine = db.create_engine('sqlite:///./database.db', echo=True)
 #Create a Session Object to initiate query in database
 SessionLocal = sessionmaker(bind=engine)

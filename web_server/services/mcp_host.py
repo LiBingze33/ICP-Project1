@@ -1,8 +1,8 @@
 import json
 import os
+
 from dotenv import load_dotenv
 from fastmcp import Client
-from fastmcp.client.transports import StreamableHttpTransport
 from openai import OpenAI
 from fastmcp.client.auth import OAuth
 from key_value.aio.stores.disk import DiskStore
@@ -10,24 +10,28 @@ from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
 from cryptography.fernet import Fernet
 
 load_dotenv()
-OAUTH_STORAGE_KEY = os.getenv("OAUTH_STORAGE_ENCRYPTION_KEY")
 
+OAUTH_STORAGE_KEY = os.getenv("OAUTH_STORAGE_ENCRYPTION_KEY")
 if not OAUTH_STORAGE_KEY:
     raise ValueError("Missing OAUTH_STORAGE_ENCRYPTION_KEY in environment.")
-#Create encrypted disk storage
+
+# Encrypted token storage for OAuth
 encrypted_storage = FernetEncryptionWrapper(
     key_value=DiskStore(directory="./oauth_tokens"),
-    fernet=Fernet(OAUTH_STORAGE_KEY)
+    fernet=Fernet(OAUTH_STORAGE_KEY),
 )
 
-weather_oauth = OAuth(token_storage=encrypted_storage)
+oauth = OAuth(token_storage=encrypted_storage)
 
-WEATHER_MCP_URL = "http://127.0.0.1:9000/mcp"
-FILE_MCP_URL = "http://127.0.0.1:9001/mcp"
+# One public parent MCP server only
+MCP_URL = "http://127.0.0.1:9000/mcp"
+
 llm_client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY"),
 )
+
+
 def extract_tool_text(tool_result) -> str:
     if isinstance(tool_result, str):
         return tool_result
@@ -43,73 +47,46 @@ def extract_tool_text(tool_result) -> str:
     return getattr(tool_result, "text", str(tool_result))
 
 
-
-# async def run_agent(user_message: str, user_id: str) -> str:
-#     #connect to the MCP server at MCP_URL
-#     #send the user identity in the header
-#     transport = StreamableHttpTransport(
-#         url=MCP_URL,
-#         headers={
-#             "X-User-Id": user_id,
-#         },
-#     )
-def choose_server(user_message: str) -> tuple[str, str, set[str]]:
+def choose_context(user_message: str) -> tuple[str, set[str]]:
     text = user_message.lower()
 
     if "file" in text or "read" in text or ".txt" in text or ".md" in text:
-        return FILE_MCP_URL, "file_style", {"list_files", "read_file","create_file","delete_file"}
+        return "files_file_style", {
+            "files_list_files",
+            "files_read_file",
+            "files_create_file",
+            "files_delete_file",
+        }
 
-    return WEATHER_MCP_URL, "bing_weather_style", {
-        "get_alerts",
-        "get_forecast",
+    return "weather_bing_weather_style", {
+        "weather_get_alerts",
+        "weather_get_forecast",
+        "weather_get_user_info",
+        "weather_only_tool",
     }
 
-async def run_agent(user_message: str, user_id: str) -> str:
-    mcp_url, prompt_name, allowed_tools = choose_server(user_message)
-    if mcp_url == WEATHER_MCP_URL:
-        mcp_client_cm = Client(mcp_url, auth=weather_oauth)   
-    else:
-        transport = StreamableHttpTransport(
-        url=mcp_url,
-        headers={
-            "X-User-Id": user_id,
-        },
-    )
-        mcp_client_cm = Client(transport)
 
-    #Open the MCP clint cconnection
+async def run_agent(user_message: str, user_id: str) -> str:
+    # user_id is kept for compatibility with your current route,
+    # but OAuth now handles identity at the MCP server side.
+    prompt_name, allowed_tools = choose_context(user_message)
+
+    mcp_client_cm = Client(MCP_URL, auth=oauth)
+
     async with mcp_client_cm as mcp_client:
-        # Now the backendd can actuallyy talk to the MCP server
         # 1. Get prompt from MCP server
         prompt_result = await mcp_client.get_prompt(prompt_name)
-        #build the initial messages list
+
+        # 2. Build messages
         messages = []
         for m in prompt_result.messages:
             text = getattr(m.content, "text", None)
             if text:
                 messages.append({"role": m.role, "content": text})
-            # After this, the messages might look like this
-            #             [
-            #     {
-            #         "role": "system",
-            #         "content": "When presenting any result from the weather server..."
-            #     }
-            # ]
-        # 2. Add user message
-        messages.append({"role": "user", "content": user_message})
-            #After this, the mesage become something like this 
-            #         [
-            #     {
-            #         "role": "system",
-            #         "content": "When presenting any result from the weather server..."
-            #     },
-            #     {
-            #         "role": "user",
-            #         "content": "what is my saved weather preference?"
-            #     }
-            # ]
 
-     # 3. Get available tools from MCP server
+        messages.append({"role": "user", "content": user_message})
+
+        # 3. Get only allowed tools
         tools_result = await mcp_client.list_tools()
 
         available_tools = []
@@ -121,29 +98,26 @@ async def run_agent(user_message: str, user_id: str) -> str:
                         "function": {
                             "name": tool.name,
                             "description": tool.description or "",
-                            "parameters": tool.inputSchema,#this will allow LLM to understand what parameters the tool will need and pay attention to the input from the user
+                            "parameters": tool.inputSchema,
                         },
                     }
                 )
 
         # 4. First LLM call
-        #Model will be able to see the prompt, the user question and the list of available tools
         first = llm_client.chat.completions.create(
             model="anthropic/claude-sonnet-4.5",
             messages=messages,
             tools=available_tools,
             max_tokens=300,
-
         )
-        #Now the backend check what the model said and there will be two possibility
-        msg = first.choices[0].message
 
+        msg = first.choices[0].message
         final_parts = []
-        #the msg.content contains the answer, no tool calls
+
         if msg.content:
             final_parts.append(msg.content)
 
-        # 5. If tool calls exist, execute them
+        # 5. Execute tool calls if any
         if msg.tool_calls:
             messages.append(
                 {
@@ -162,39 +136,45 @@ async def run_agent(user_message: str, user_id: str) -> str:
                     ],
                 }
             )
-            #This could be important to add in the report, even if the model ask for a weird tool, only these three are allowed
+
             for tc in msg.tool_calls:
-            # get tool name
                 tool_name = tc.function.name
 
-                # BLOCK not allowed tools
+                # Allowlist check
                 if tool_name not in allowed_tools:
                     raise ValueError(f"Tool not allowed: {tool_name}")
 
-                # parse the tool arguments
+                # Parse arguments
                 tool_args = json.loads(tc.function.arguments or "{}")
 
-                # validate input
-                if tool_name == "get_alerts":
+                # Input validation
+                if tool_name == "weather_get_alerts":
                     state = tool_args.get("state", "")
-                    if not isinstance(state, str) or len(state) != 2:
+                    if not isinstance(state, str) or len(state.strip()) != 2:
                         raise ValueError("Invalid state code.")
 
-                if tool_name == "get_forecast":
+                if tool_name == "weather_get_forecast":
                     lat = tool_args.get("latitude")
                     lon = tool_args.get("longitude")
                     if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
                         raise ValueError("Invalid coordinates.")
 
-                if tool_name == "read_file":
+                if tool_name in {
+                    "files_read_file",
+                    "files_create_file",
+                    "files_delete_file",
+                }:
                     filename = tool_args.get("filename", "")
                     if not isinstance(filename, str) or not filename.strip():
                         raise ValueError("Invalid filename.")
 
-                # call the MCP tool
-                tool_result = await mcp_client.call_tool(tool_name, tool_args)
+                if tool_name == "files_create_file":
+                    content = tool_args.get("content", "")
+                    if not isinstance(content, str):
+                        raise ValueError("Invalid file content.")
 
-                # convert the tool result into plain text
+                # Call MCP tool
+                tool_result = await mcp_client.call_tool(tool_name, tool_args)
                 tool_text = extract_tool_text(tool_result)
 
                 messages.append(
@@ -204,21 +184,16 @@ async def run_agent(user_message: str, user_id: str) -> str:
                         "content": tool_text,
                     }
                 )
-                #now the model can see for example : the tool result is Los Angeles, CA
-            # 6. Second LLM call with tool results
-            #Now the model will have the tool result
-            #The first model could not answer fully, as the tool had not run yet
-            #things like here is the tooloutput, turn into a final user-facing answer
+
+            # 6. Second LLM call with tool outputs
             second = llm_client.chat.completions.create(
                 model="anthropic/claude-sonnet-4.5",
                 messages=messages,
                 tools=available_tools,
                 max_tokens=300,
-
             )
 
             if second.choices[0].message.content:
                 final_parts.append(second.choices[0].message.content)
 
         return "\n".join(part for part in final_parts if part).strip()
-    
