@@ -1,73 +1,234 @@
-# MCP Weather Client
+# Secure AI MCP Web Server
 
-This project is a simple MCP client that connects to a local weather server and allows users to interact with weather tools through the terminal.
+This project is a prototype web application for exploring the secure use of AI models with external APIs and Model Context Protocol (MCP) servers. The project focuses on layered security controls such as authentication, authorization, controlled tool access, and safer interaction with local or remote resources.
+
+The system includes:
+
+- a web interface for user interaction
+- a main MCP controller
+- multiple MCP servers for different tasks
+- a database layer for local user and role handling
+- middleware for authentication and authorization checks
+
+## Project Purpose
+
+This project is security-first rather than product-first. Its purpose is to explore how an AI-enabled system can safely interact with APIs, MCP servers, and tools without allowing unsafe actions, prompt bypass, privilege abuse, or unauthorized access.
+
+The prototype supports the broader project goal of demonstrating a secure architecture for AI systems, where the main deliverable is a report and the software acts as a supporting proof of concept.
+
+## Features
+
+- Web-based chat interface
+- MCP-based tool integration
+- Local database support with SQLAlchemy
+- Authentication and authorization middleware
+- OAuth token caching
+- Support for multiple MCP servers such as:
+  - weather server
+  - local file server
 
 ## Requirements
 
 - Python 3.10 or above
 - pip
-- An OpenRouter API key
+- virtual environment support
+- OpenRouter API key configured locally
+- OAuth credentials if OAuth-based login is enabled
 
 ## Installation
 
-Create and activate a virtual environment:
+Create and activate the virtual environment:
 
-python3 -m venv .venv
-source .venv/bin/activate
+```bash
+python3 -m venv venv
+source venv/bin/activate
+```
 
-Install the required modules:
+Install dependencies:
 
-pip install openai python-dotenv mcp httpx
+```bash
+make install
+```
 
-## Environment Variables
+## API Key and Local Configuration
 
-Create a `.env` file in the `mcp-client` folder and add the following line:
+The API key is stored locally in the development environment rather than hardcoded into the project files.
 
-OPENROUTER_API_KEY=your_api_key_here
+For example, it can be loaded from your local shell configuration:
 
+```bash
+source ~/.zshrc
+```
+
+If needed, other local credentials such as OAuth client details should also be stored securely in the local environment and not committed to GitHub.
 
 ## Project Structure
 
-ICP1/
-├── mcp-client/
-│   ├── client.py
-│   ├── README.md
-│   └── .env
-└── weather/
-    └── weather.py
+```text
+web_server/
+├── database/
+│   ├── db.py
+│   └── model.py
+├── demo_docs/
+├── mcp_servers/
+│   ├── demo_docs/
+│   ├── secrets/
+│   ├── local_file_server.py
+│   └── weather_http_server.py
+├── middleware/
+│   ├── __init__.py
+│   └── auth.py
+├── oauth_tokens/
+│   ├── cache.db
+│   ├── cache.db-shm
+│   └── cache.db-wal
+├── pages/
+│   └── home.html
+├── services/
+│   └── mcp_host.py
+├── venv/
+├── database.db
+├── main.py
+├── main_mcp.py
+├── Makefile
+├── .gitignore
+└── README.md
+```
+
+## Main Components
+
+### `main.py`
+Starts the FastAPI web application and serves the main interface.
+
+### `main_mcp.py`
+Runs the parent MCP process that coordinates MCP-related functionality.
+
+### `mcp_servers/`
+Contains the individual MCP servers.
+
+- `weather_http_server.py` handles weather-related MCP requests
+- `local_file_server.py` handles local file access for demonstration purposes
+
+### `database/`
+Contains the database setup and models.
+
+- `db.py` configures the SQLAlchemy engine and session
+- `model.py` defines the database tables
+
+### `middleware/`
+Contains authentication and authorization logic.
+
+### `services/mcp_host.py`
+Handles communication between the web application and MCP services.
+
+### `pages/home.html`
+Frontend HTML page for the web interface.
 
 ## How to Run
 
-From inside the `mcp-client` folder, run:
+Start the MCP service:
 
-python -u client.py ../weather/weather.py
+```bash
+make mcp
+```
 
-## Example Usage
+In a separate terminal, start the web server:
 
-After running the client, type your query in the terminal.
+```bash
+make web
+```
 
-Example queries:
-- What weather tools do you have?
-- Are there any alerts in California?
-- What is the forecast for a location?
+Then open the application in your browser:
 
-Type `quit` to exit the program.
+```text
+http://127.0.0.1:8000
+```
 
-## Important Notes
+## Makefile Commands
 
-Make sure the following files and folders are not pushed to GitHub:
-- `.env`
-- `.venv`
-- `venv`
-- `__pycache__`
+### Install dependencies
 
-A typical `.gitignore` file should include:
+```bash
+make install
+```
 
+### Run MCP service
+
+```bash
+make mcp
+```
+
+### Run web server
+
+```bash
+make web
+```
+
+### Show startup instructions
+
+```bash
+make all
+```
+
+## Current Makefile
+
+```makefile
+VENV = venv
+PYTHON = $(VENV)/bin/python3
+PIP = $(VENV)/bin/pip
+UVICORN = $(VENV)/bin/uvicorn
+
+.PHONY: install mcp web all
+
+install:
+	python3 -m venv $(VENV)
+	$(PIP) install fastapi uvicorn jinja2 pydantic python-dotenv openai fastmcp httpx sqlalchemy cryptography "py-key-value-aio[disk]" diskcache
+
+mcp:
+	$(PYTHON) main_mcp.py
+
+web:
+	$(UVICORN) main:app --reload --port 8000
+
+all:
+	@echo "Run these in separate terminals:"
+	@echo "make mcp"
+	@echo "make web"
+```
+
+## Security Notes
+
+This project is intended to demonstrate secure design ideas for AI systems that interact with tools and MCP servers. Depending on the implementation, security controls may include:
+
+- user authentication
+- authorization checks before tool execution
+- restricted file access
+- OAuth-based identity flow
+- validation of tool requests and responses
+- pre-tool and post-tool security checks
+
+This is a prototype and should not be treated as production-ready security software.
+
+## Important Files to Exclude from GitHub
+
+Make sure these are included in `.gitignore`:
+
+```gitignore
 .env
-.venv/
 venv/
 __pycache__/
 *.pyc
+oauth_tokens/
+database.db
+cache.db
+cache.db-shm
+cache.db-wal
+mcp_servers/secrets/
+```
 
-A another way to save save the APi token is 
-source ~/.zshrc            # as your local variable
+## Notes
+
+- Keep API keys and OAuth secrets out of source control
+- Use the local database and token cache only for development or demonstration unless properly secured
+- Review all AI-assisted code before using it in the prototype
+- The software prototype supports the report and is not the primary deliverable
