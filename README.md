@@ -232,3 +232,14 @@ mcp_servers/secrets/
 - Use the local database and token cache only for development or demonstration unless properly secured
 - Review all AI-assisted code before using it in the prototype
 - The software prototype supports the report and is not the primary deliverable
+
+##docker
+docker build -t icp-web -f Dockerfile.web .
+- docker build
+	- tells Docker to create an image
+- -t icp-web
+	- gives the image a name: icp-web
+- -f Dockerfile.web
+	- tells Docker which Dockerfile recipe to use
+- .
+	- make current folder as the build text

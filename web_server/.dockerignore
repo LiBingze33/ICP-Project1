@@ -1,0 +1,6 @@
+venv/
+__pycache__/
+.git
+.env
+oauth_tokens/
+database.db
