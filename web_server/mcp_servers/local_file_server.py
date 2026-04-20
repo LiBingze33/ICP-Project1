@@ -3,7 +3,7 @@ from fastmcp import FastMCP
 
 file_mcp = FastMCP("file_server")
 
-BASE_DIR = Path(__file__).parent / "demo_docs"
+BASE_DIR = Path(__file__).parent / "../demo_docs"
 BASE_DIR.mkdir(exist_ok=True)
 
 

@@ -26,12 +26,24 @@ oauth = OAuth(token_storage=encrypted_storage)
 # One public parent MCP server only
 MCP_URL = "http://127.0.0.1:9000/mcp"
 
-llm_client = OpenAI(
+# llm_client = OpenAI(
+#     base_url="https://openrouter.ai/api/v1",
+#     api_key=os.getenv("OPENROUTER_API_KEY"),
+# )
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
+
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "anthropic/claude-sonnet-4.5")
+
+ollama_client = OpenAI(
+    base_url=OLLAMA_BASE_URL,
+    api_key="ollama",  # required by client library, not really used by Ollama
+)
+
+openrouter_client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY"),
 )
-
-
 def extract_tool_text(tool_result) -> str:
     if isinstance(tool_result, str):
         return tool_result
@@ -64,6 +76,55 @@ def choose_context(user_message: str) -> tuple[str, set[str]]:
         "weather_get_user_info",
         "weather_only_tool",
     }
+
+def call_llm_with_fallback(messages, available_tools, max_tokens=1200):
+    try:
+        result = ollama_client.chat.completions.create(
+            model=OLLAMA_MODEL,
+            messages=messages,
+            tools=available_tools,
+            max_tokens=max_tokens,
+        )
+
+        choice = result.choices[0]
+        msg = choice.message
+
+        content = msg.content or ""
+        tool_calls = msg.tool_calls
+
+        print("\n===== OLLAMA DEBUG START =====")
+        print("MODEL:", OLLAMA_MODEL)
+        print("MAX TOKENS:", max_tokens)
+        print("FINISH REASON:", getattr(choice, "finish_reason", None))
+        print("CONTENT REPR:", repr(content))
+        print("CONTENT LENGTH:", len(content))
+        print("TOOL CALLS:", repr(tool_calls))
+        print("USAGE:", getattr(result, "usage", None))
+
+        # print the whole first choice if available
+        try:
+            print("RAW CHOICE:", choice.model_dump())
+        except Exception:
+            print("RAW CHOICE (str):", str(choice))
+
+        print("===== OLLAMA DEBUG END =====\n")
+
+        # return the result no matter what, so you can observe actual behavior
+        return result
+
+    except Exception as e:
+        print("\n===== OLLAMA EXCEPTION =====")
+        print(repr(e))
+        print("===== FALLBACK TO OPENROUTER =====\n")
+
+    return openrouter_client.chat.completions.create(
+        model=OPENROUTER_MODEL,
+        messages=messages,
+        tools=available_tools,
+        max_tokens=150,
+    )
+
+
 
 
 async def run_agent(user_message: str) -> str:
@@ -104,11 +165,10 @@ async def run_agent(user_message: str) -> str:
                 )
 
         # 4. First LLM call
-        first = llm_client.chat.completions.create(
-            model="anthropic/claude-sonnet-4.5",
+        first = call_llm_with_fallback(
             messages=messages,
-            tools=available_tools,
-            max_tokens=300,
+            available_tools=available_tools,
+            max_tokens=1200,
         )
 
         msg = first.choices[0].message
@@ -186,11 +246,10 @@ async def run_agent(user_message: str) -> str:
                 )
 
             # 6. Second LLM call with tool outputs
-            second = llm_client.chat.completions.create(
-                model="anthropic/claude-sonnet-4.5",
+            second = call_llm_with_fallback(
                 messages=messages,
-                tools=available_tools,
-                max_tokens=300,
+                available_tools=available_tools,
+                max_tokens=1200,
             )
 
             if second.choices[0].message.content:
