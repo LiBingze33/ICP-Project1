@@ -18,7 +18,7 @@
         button {
             margin-top: 12px;
             padding: 10px 20px;
-            background-color:bisque
+            background-color: bisque;
         }
 
         pre {
@@ -28,19 +28,32 @@
             border-radius: 8px;
             margin-top: 20px;
         }
+
+        .login {
+            margin-bottom: 20px;
+            padding: 12px;
+            background: #f5f5f5;
+            border-radius: 8px;
+        }
     </style>
 </head>
 <body>
     <h1>MCP Web Chat</h1>
 
-    <textarea id="msg" placeholder="Ask anythings, external tools might be involved"></textarea>
+    <div class="login">
+        <a href="/login">Login with GitHub</a>
+        |
+        <a href="/logout">Logout</a>
+    </div>
+
+    <textarea id="msg" placeholder="Ask anything, external tools might be involved"></textarea>
     <br>
-    <button onclick="sendMsg()">Send</button>
+    <button onclick="send_message()">Send</button>
 
     <pre id="out">Response will appear here...</pre>
 
     <script>
-        async function sendMsg() {
+        async function send_message() {
             const message = document.getElementById("msg").value;
             document.getElementById("out").textContent = "Waiting for reply.......";
 
