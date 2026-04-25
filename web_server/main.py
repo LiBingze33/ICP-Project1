@@ -8,7 +8,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
 
-from database import model
+from database.model import User
 from database.db import engine, Base, SessionLocal
 from services.mcp_host import run_agent
 #FastAPI web app with GitHub OAuth Login
@@ -71,20 +71,48 @@ async def login(request: Request):
 
 @app.get("/auth/callback")
 async def auth_callback(request: Request):
-    #This is just to get the access toekn, not enough to get an idea of who just logged in
+    # Get access token from GitHub
     token = await oauth.github.authorize_access_token(request)
-    #use the token to call GitHub's API and get the user profile
+
+    # Use token to get GitHub user profile
     res = await oauth.github.get("user", token=token)
     github_user = res.json()
 
-    request.session["user"] = {
-        "login": github_user.get("login"),
-        "id": github_user.get("id"),
-        "avatar_url": github_user.get("avatar_url"),
-    }
+    github_login = github_user.get("login")
+    github_id = github_user.get("id")
+    avatar_url = github_user.get("avatar_url")
+
+    if not github_login:
+        return {"error": "GitHub login was not found."}
+
+    # Save or update user in local database
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.github_login == github_login).first()
+
+        if not user:
+            user = User(
+                github_login=github_login,
+                email=None,
+                role="user",
+            )
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+
+        # Store logged-in user in session
+        request.session["user"] = {
+            "user_id": user.user_id,
+            "login": user.github_login,
+            "github_id": github_id,
+            "avatar_url": avatar_url,
+            "role": user.role,
+        }
+
+    finally:
+        db.close()
 
     return RedirectResponse(url="/")
-
 
 @app.get("/logout")
 async def logout(request: Request):
