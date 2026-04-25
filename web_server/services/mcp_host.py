@@ -1,3 +1,27 @@
+TOOL_POLICIES = {
+    "weather": {
+        "prompt": "weather_bing_weather_style",
+        "allowed_tools": {
+            "weather_get_alerts",
+            "weather_get_forecast",
+            "weather_get_user_info",
+        },
+        "restricted_tools": {
+            "weather_only_tool",
+        },
+    },
+    "files": {
+        "prompt": "files_file_style",
+        "allowed_tools": {
+            "files_list_files",
+            "files_read_file",
+        },
+        "restricted_tools": {
+            "files_create_file",
+            "files_delete_file",
+        },
+    },
+}
 import json
 import os
 
@@ -59,23 +83,15 @@ def extract_tool_text(tool_result) -> str:
     return getattr(tool_result, "text", str(tool_result))
 
 
-def choose_context(user_message: str) -> tuple[str, set[str]]:
+def choose_context(user_message: str) -> tuple[str, set[str], set[str]]:
     text = user_message.lower()
 
     if "file" in text or "read" in text or ".txt" in text or ".md" in text:
-        return "files_file_style", {
-            "files_list_files",
-            "files_read_file",
-            "files_create_file",
-            "files_delete_file",
-        }
+        policy = TOOL_POLICIES["files"]
+    else:
+        policy = TOOL_POLICIES["weather"]
 
-    return "weather_bing_weather_style", {
-        "weather_get_alerts",
-        "weather_get_forecast",
-        "weather_get_user_info",
-        "weather_only_tool",
-    }
+    return policy["prompt"], policy["allowed_tools"], policy["restricted_tools"]
 
 def call_llm_with_fallback(messages, available_tools, max_tokens=1200):
     try:
@@ -130,8 +146,7 @@ def call_llm_with_fallback(messages, available_tools, max_tokens=1200):
 async def run_agent(user_message: str) -> str:
     # user_id is kept for compatibility with your current route,
     # but OAuth now handles identity at the MCP server side.
-    prompt_name, allowed_tools = choose_context(user_message)
-
+    prompt_name, allowed_tools, restricted_tools = choose_context(user_message)
     mcp_client_cm = Client(MCP_URL, auth=oauth)
 
     async with mcp_client_cm as mcp_client:
@@ -201,6 +216,9 @@ async def run_agent(user_message: str) -> str:
                 tool_name = tc.function.name
 
                 # Allowlist check
+                if tool_name in restricted_tools:
+                   raise ValueError(f"Restricted tool blocked: {tool_name}")
+
                 if tool_name not in allowed_tools:
                     raise ValueError(f"Tool not allowed: {tool_name}")
 
