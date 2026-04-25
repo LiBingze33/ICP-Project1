@@ -13,4 +13,5 @@ class User(Base):
     github_login = Column(String, unique=True, nullable=False, index=True)
     email = Column(String, unique=False, nullable=True)
     role = Column(String, nullable=False, default="user")
+    workspace_path = Column(String, nullable=False)
 

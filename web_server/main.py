@@ -11,9 +11,10 @@ from starlette.middleware.sessions import SessionMiddleware
 from database.model import User
 from database.db import engine, Base, SessionLocal
 from services.mcp_host import run_agent
+from pathlib import Path
 #FastAPI web app with GitHub OAuth Login
 load_dotenv()
-
+BASE_WORKSPACE_DIR = Path("user_workspaces").resolve()
 app = FastAPI()
 #add session support to the FastAPI app, so the app can remember who logged in
 #This add a middleware layer to the web app
@@ -77,7 +78,6 @@ async def auth_callback(request: Request):
     # Use token to get GitHub user profile
     res = await oauth.github.get("user", token=token)
     github_user = res.json()
-
     github_login = github_user.get("login")
     github_id = github_user.get("id")
     avatar_url = github_user.get("avatar_url")
@@ -85,6 +85,15 @@ async def auth_callback(request: Request):
     if not github_login:
         return {"error": "GitHub login was not found."}
 
+    
+    
+    # Create a stable workspace folder for this GitHub user
+    workspace_path = BASE_WORKSPACE_DIR / f"github_{github_login}"
+    workspace_path.mkdir(parents=True, exist_ok=True)
+
+    
+    
+    
     # Save or update user in local database
     db = SessionLocal()
     try:
@@ -95,20 +104,34 @@ async def auth_callback(request: Request):
                 github_login=github_login,
                 email=None,
                 role="user",
+                workspace_path=str(workspace_path),
+
             )
             db.add(user)
             db.commit()
             db.refresh(user)
 
-        # Store logged-in user in session
+
+        else:
+            #If user already exists, make sure they have a workspace path
+            if not user.workspace_path:
+                user.workspace_path = str(workspace_path)
+                db.commit()
+                db.refresh(user)
+
+            # Make sure the folder still exists
+            Path(user.workspace_path).mkdir(parents=True, exist_ok=True)
+
+                # Store logged-in user in session
         request.session["user"] = {
             "user_id": user.user_id,
             "login": user.github_login,
             "github_id": github_id,
             "avatar_url": avatar_url,
             "role": user.role,
-        }
+            "workspace_path": user.workspace_path,
 
+        }
     finally:
         db.close()
 
