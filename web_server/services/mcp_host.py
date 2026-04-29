@@ -70,65 +70,58 @@ def filter_tools_by_user_role(allowed_tools: set[str], user: dict) -> set[str]:
     """
     role = user.get("role", "user")
 
-    if role == "admin":
+    if role == "users":
         return allowed_tools
 
     # Normal users cannot modify files
     restricted_tools = {
-        "files_create_file",
+        # "files_create_file",
         "files_delete_file",
     }
 
     return allowed_tools - restricted_tools
 
 
-def call_llm_with_fallback(messages, available_tools, max_tokens=1200):
-    try:
-        result = ollama_client.chat.completions.create(
-            model=OLLAMA_MODEL,
-            messages=messages,
-            tools=available_tools,
-            max_tokens=max_tokens,
+def call_llm(messages, available_tools, backend="openrouter", max_tokens=500):
+    backend = backend.lower()
+
+    if backend == "openrouter":
+        client = openrouter_client
+        model = OPENROUTER_MODEL
+
+    elif backend == "ollama":
+        client = ollama_client
+        model = OLLAMA_MODEL
+
+    else:
+        raise ValueError(
+            f"Invalid backend '{backend}'. Use 'openrouter' or 'ollama'."
         )
 
-        choice = result.choices[0]
-        msg = choice.message
-
-        content = msg.content or ""
-        tool_calls = msg.tool_calls
-
-        print("\n===== OLLAMA DEBUG START =====")
-        print("MODEL:", OLLAMA_MODEL)
-        print("MAX TOKENS:", max_tokens)
-        print("FINISH REASON:", getattr(choice, "finish_reason", None))
-        print("CONTENT REPR:", repr(content))
-        print("CONTENT LENGTH:", len(content))
-        print("TOOL CALLS:", repr(tool_calls))
-        print("USAGE:", getattr(result, "usage", None))
-
-        try:
-            print("RAW CHOICE:", choice.model_dump())
-        except Exception:
-            print("RAW CHOICE (str):", str(choice))
-
-        print("===== OLLAMA DEBUG END =====\n")
-
-        return result
-
-    except Exception as e:
-        print("\n===== OLLAMA EXCEPTION =====")
-        print(repr(e))
-        print("===== FALLBACK TO OPENROUTER =====\n")
-
-    return openrouter_client.chat.completions.create(
-        model=OPENROUTER_MODEL,
+    result = client.chat.completions.create(
+        model=model,
         messages=messages,
         tools=available_tools,
-        max_tokens=300,
+        max_tokens=max_tokens,
     )
 
+    choice = result.choices[0]
+    msg = choice.message
 
-async def run_agent(user_message: str, user: dict) -> str:
+    print("\n===== LLM DEBUG START =====")
+    print("BACKEND:", backend)
+    print("MODEL:", model)
+    print("MAX TOKENS:", max_tokens)
+    print("FINISH REASON:", getattr(choice, "finish_reason", None))
+    print("CONTENT REPR:", repr(msg.content or ""))
+    print("CONTENT LENGTH:", len(msg.content or ""))
+    print("TOOL CALLS:", repr(msg.tool_calls))
+    print("USAGE:", getattr(result, "usage", None))
+    print("===== LLM DEBUG END =====\n")
+
+    return result
+
+async def run_agent(user_message: str, user: dict,backend: str = "openrouter") -> str:
     """
     user comes from FastAPI session after GitHub OAuth login.
 
@@ -193,10 +186,11 @@ async def run_agent(user_message: str, user: dict) -> str:
                 )
 
         # 4. First LLM call
-        first = call_llm_with_fallback(
+        first = call_llm(
             messages=messages,
             available_tools=available_tools,
-            max_tokens=1200,
+            backend=backend,
+            max_tokens=500,
         )
 
         msg = first.choices[0].message
@@ -270,7 +264,19 @@ async def run_agent(user_message: str, user: dict) -> str:
                     content = tool_args.get("content", "")
                     if not isinstance(content, str):
                         raise ValueError("Invalid file content.")
+                # This makes sure file tools only use the current user's private folder.
+                if tool_name in {
+                    "files_list_files",
+                    "files_read_file",
+                    "files_create_file",
+                    "files_delete_file",
+                }:
+                    workspace_path = user.get("workspace_path")
 
+                    if not workspace_path:
+                        raise ValueError("User workspace path was not found in session.")
+
+                    tool_args["workspace_path"] = workspace_path
                 # Call MCP tool internally
                 tool_result = await mcp_client.call_tool(tool_name, tool_args)
                 tool_text = extract_tool_text(tool_result)
@@ -284,10 +290,11 @@ async def run_agent(user_message: str, user: dict) -> str:
                 )
 
             # 6. Second LLM call with tool outputs
-            second = call_llm_with_fallback(
+            second = call_llm(
                 messages=messages,
                 available_tools=available_tools,
-                max_tokens=1200,
+                backend=backend,
+                max_tokens=500,
             )
 
             if second.choices[0].message.content:

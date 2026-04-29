@@ -7,7 +7,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
-
+from typing import Literal
 from database.model import User
 from database.db import engine, Base, SessionLocal
 from services.mcp_host import run_agent
@@ -52,15 +52,22 @@ Base.metadata.create_all(bind=engine)
 
 class ChatRequest(BaseModel):
     message: str
+    backend: Literal["openrouter", "ollama"] = "openrouter"
 
 #Homepage
 @app.get("/")
 async def home(req: Request):
+    #this will retrive the whole session
     user = req.session.get("user")
+
+    username = None
+    if user:
+        username = user.get("login")
+
     return htmls.TemplateResponse(
         req,
         "home.html",
-        {"user": user},
+        {"user": username},
     )
 
 
@@ -113,8 +120,9 @@ async def auth_callback(request: Request):
 
 
         else:
-            #If user already exists, make sure they have a workspace path
-            if not user.workspace_path:
+            # Always make sure the stored workspace path matches the current GitHub login.
+            # Update worksapce if necessary
+            if user.workspace_path != str(workspace_path):
                 user.workspace_path = str(workspace_path)
                 db.commit()
                 db.refresh(user)
@@ -152,8 +160,11 @@ async def chat(req: ChatRequest, request: Request):
         if not user:
             return {"error": "Please log in with GitHub before using the tools."}
 
-        reply = await run_agent(req.message, user)
-        return {"reply": reply}
+        reply = await run_agent(req.message, user, req.backend)
+        return {
+            "reply": reply,
+            "backend_used": req.backend,
+}
 
     except Exception as e:
         return {"error": str(e)}
