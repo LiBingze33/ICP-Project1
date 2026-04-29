@@ -6,7 +6,7 @@ from fastmcp.server.auth.providers.github import GitHubProvider
 from mcp_servers.weather_http_server import weather_mcp
 from mcp_servers.local_file_server import file_mcp
 
-load_dotenv()
+load_dotenv(".env", override=True)
 
 GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")
 GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
