@@ -25,7 +25,7 @@ app.add_middleware(
     #Allow normal login, but do not send cookie everywhere
     same_site="lax",
     #make sure the session cookie is only sent over HTTPs
-    https_only=True,
+    # https_only=True,
 )
 
 oauth = OAuth()
@@ -73,7 +73,7 @@ async def home(req: Request):
 
 @app.get("/login")
 async def login(request: Request):
-    redirect_uri = "https://9163.syslab.au/auth/callback"
+    redirect_uri = "http://127.0.0.1:8000/auth/callback"
     return await oauth.github.authorize_redirect(request, redirect_uri)
 
 
