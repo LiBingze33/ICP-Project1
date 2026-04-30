@@ -1,3 +1,5 @@
+from middleware import check_tool_response
+
 TOOL_POLICIES = {
     "weather": {
         "prompt": "weather_bing_weather_style",
@@ -10,14 +12,15 @@ TOOL_POLICIES = {
             "weather_only_tool",
         },
     },
+
     "files": {
         "prompt": "files_file_style",
         "allowed_tools": {
             "files_list_files",
             "files_read_file",
+            "files_create_file",
         },
         "restricted_tools": {
-            "files_create_file",
             "files_delete_file",
         },
     },
@@ -254,6 +257,9 @@ async def run_agent(user_message: str) -> str:
                 # Call MCP tool
                 tool_result = await mcp_client.call_tool(tool_name, tool_args)
                 tool_text = extract_tool_text(tool_result)
+
+                # Check tool output before sending it back to the model
+                tool_text = check_tool_response(tool_name, tool_text)
 
                 messages.append(
                     {

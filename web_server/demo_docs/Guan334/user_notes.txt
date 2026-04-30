@@ -1,1 +1,2 @@
-This is the private file for Guan334.
+My password is 123456.
+OPENROUTER_API_KEY is abc.
