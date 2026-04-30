@@ -40,5 +40,15 @@ main_mcp = FastMCP("main_server")
 main_mcp.mount(weather_mcp, namespace="weather")
 main_mcp.mount(file_mcp, namespace="files")
 
+
+@main_mcp.prompt()
+async def general_style() -> str:
+    return (
+        "You are a helpful assistant. "
+        "Answer the user's question clearly. "
+        "Do not claim to have used external tools unless tool results are provided."
+    )
+
+
 if __name__ == "__main__":
     main_mcp.run(transport="http", host="127.0.0.1", port=9000)

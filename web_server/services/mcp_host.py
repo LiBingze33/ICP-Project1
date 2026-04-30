@@ -1,11 +1,39 @@
 import json
 import os
-
 from dotenv import load_dotenv
 from fastmcp import Client
 from openai import OpenAI
 
 load_dotenv()
+
+TOOL_POLICIES = {
+    "general": {
+        "prompt": "general_style",
+        "allowed_tools": set(),
+    },
+    "weather": {
+        "prompt": "weather_bing_weather_style",
+        "allowed_tools": {
+            "weather_get_alerts",
+            "weather_get_forecast",
+            "weather_get_user_info",
+        },
+    },
+    "files": {
+        "prompt": "files_file_style",
+        "allowed_tools": {
+            "files_list_files",
+            "files_read_file",
+            "files_create_file",
+            "files_delete_file",
+        },
+    },
+}
+
+
+
+
+
 
 # MCP is called internally by FastAPI after the user has logged in.
 # For VM deployment, keep this as 127.0.0.1 because MCP runs on the same VM.
@@ -25,6 +53,41 @@ openrouter_client = OpenAI(
     api_key=os.getenv("OPENROUTER_API_KEY"),
 )
 
+def classify_context_with_ai(user_message: str, backend: str = "openrouter") -> str:
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Classify the user's request into exactly one category: "
+                "files, weather, or general. "
+                "Return only one word. "
+                "Use files if the user wants to list, read, create, write, delete, "
+                "open, show, or summarise local files, folders, documents, notes, "
+                "or workspace content. "
+                "Use weather if the user asks about weather, forecast, temperature, "
+                "rain, alerts, or location weather. "
+                "Use general if no tool is needed."
+            ),
+        },
+        {
+            "role": "user",
+            "content": user_message,
+        },
+    ]
+
+    result = call_llm(
+        messages=messages,
+        available_tools=[],
+        backend=backend,
+        max_tokens=10,
+    )
+
+    category = (result.choices[0].message.content or "").strip().lower()
+
+    if category not in {"files", "weather", "general"}:
+        return "general"
+
+    return category
 
 def extract_tool_text(tool_result) -> str:
     if isinstance(tool_result, str):
@@ -41,46 +104,34 @@ def extract_tool_text(tool_result) -> str:
     return getattr(tool_result, "text", str(tool_result))
 
 
-def choose_context(user_message: str) -> tuple[str, set[str]]:
-    text = user_message.lower()
+def choose_context(user_message: str, backend: str = "openrouter") -> tuple[str, set[str]]:
+    category = classify_context_with_ai(user_message, backend=backend)
 
-    if "file" in text or "read" in text or ".txt" in text or ".md" in text:
-        return "files_file_style", {
-            "files_list_files",
-            "files_read_file",
-            "files_create_file",
-            "files_delete_file",
-        }
+    if category not in TOOL_POLICIES:
+        category = "general"
+    #for now, file or weather
+    policy = TOOL_POLICIES[category]
 
-    return "weather_bing_weather_style", {
-        "weather_get_alerts",
-        "weather_get_forecast",
-        "weather_get_user_info",
-        "weather_only_tool",
-    }
-
+    return policy["prompt"], policy["allowed_tools"]
 
 def filter_tools_by_user_role(allowed_tools: set[str], user: dict) -> set[str]:
     """
     Simple role-based authorization layer.
 
     Default GitHub login creates a normal user.
-    Normal users should not be able to create/delete files.
+    Normal users should not be able to delete files.
     Admins can use all tools in the selected context.
     """
     role = user.get("role", "user")
 
-    if role == "users":
+    if role == "admin":
         return allowed_tools
 
-    # Normal users cannot modify files
     restricted_tools = {
-        # "files_create_file",
         "files_delete_file",
     }
 
     return allowed_tools - restricted_tools
-
 
 def call_llm(messages, available_tools, backend="openrouter", max_tokens=500):
     backend = backend.lower()
@@ -98,12 +149,16 @@ def call_llm(messages, available_tools, backend="openrouter", max_tokens=500):
             f"Invalid backend '{backend}'. Use 'openrouter' or 'ollama'."
         )
 
-    result = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        tools=available_tools,
-        max_tokens=max_tokens,
-    )
+    request_args = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+    }
+
+    if available_tools:
+        request_args["tools"] = available_tools
+
+    result = client.chat.completions.create(**request_args)
 
     choice = result.choices[0]
     msg = choice.message
@@ -112,6 +167,7 @@ def call_llm(messages, available_tools, backend="openrouter", max_tokens=500):
     print("BACKEND:", backend)
     print("MODEL:", model)
     print("MAX TOKENS:", max_tokens)
+    print("AVAILABLE TOOLS:", [t["function"]["name"] for t in available_tools])
     print("FINISH REASON:", getattr(choice, "finish_reason", None))
     print("CONTENT REPR:", repr(msg.content or ""))
     print("CONTENT LENGTH:", len(msg.content or ""))
@@ -136,8 +192,7 @@ async def run_agent(user_message: str, user: dict,backend: str = "openrouter") -
     github_login = user.get("login", "unknown_user")
     role = user.get("role", "user")
 
-    prompt_name, allowed_tools = choose_context(user_message)
-
+    prompt_name, allowed_tools = choose_context(user_message, backend=backend)
     # Apply authorization based on logged-in user's role
     allowed_tools = filter_tools_by_user_role(allowed_tools, user)
 
