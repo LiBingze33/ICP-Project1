@@ -22,6 +22,8 @@ auth = GitHubProvider(
 
 main_mcp = FastMCP("main_server", auth=auth)
 
+# main_mcp = FastMCP("main_server")
+
 # Mount child servers
 main_mcp.mount(weather_mcp, namespace="weather")
 main_mcp.mount(file_mcp, namespace="files")

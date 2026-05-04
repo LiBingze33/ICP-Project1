@@ -1,15 +1,17 @@
 from pathlib import Path
 from fastmcp import FastMCP
+from middleware import FileMiddleware
 
 file_mcp = FastMCP("file_server")
 
 BASE_DIR = Path(__file__).parent / "demo_docs"
 BASE_DIR.mkdir(exist_ok=True)
+file_mcp.add_middleware(FileMiddleware(workspace_root=BASE_DIR))
 
 
 def safe_path(filename: str) -> Path | None:
     # Only allow plain filenames inside demo_docs
-    if not filename or "/" in filename or "\\" in filename or ".." in filename:
+    if not filename or Path(filename).is_absolute() or "/" in filename or "\\" in filename or ".." in filename:
         return None
     return BASE_DIR / filename
 
@@ -67,8 +69,10 @@ async def create_file(filename: str, content: str) -> str:
 
 
 @file_mcp.tool()
-async def delete_file(filename: str) -> str:
+async def delete_file(filename: str, confirm: bool = False) -> str:
     """Delete a file from the demo_docs folder."""
+    if confirm is not True:
+        return "Deletion not confirmed. Set 'confirm' to true to delete the file."
     path = safe_path(filename)
     if path is None:
         return "Invalid filename."

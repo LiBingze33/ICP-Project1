@@ -231,4 +231,4 @@ mcp_servers/secrets/
 - Keep API keys and OAuth secrets out of source control
 - Use the local database and token cache only for development or demonstration unless properly secured
 - Review all AI-assisted code before using it in the prototype
-- The software prototype supports the report and is not the primary deliverable
+- The software prototype supports the report and is not the primary deliverabl
