@@ -3,7 +3,7 @@ import httpx
 from fastmcp import FastMCP
 from database.db import SessionLocal
 from database.model import User
-from middleware.auth import require_local_user, require_local_admin
+# from middleware.auth import require_local_user, require_local_admin
 
 # Child MCP server only
 weather_mcp = FastMCP("weather")
@@ -118,7 +118,7 @@ Forecast: {period.get("detailedForecast", "No forecast available")}
     return "\n---\n".join(forecasts)
 
 
-@weather_mcp.tool(auth=require_local_user)
+@weather_mcp.tool()
 async def get_user_info() -> dict:
     """Return the currently authenticated user's GitHub and local role info."""
     from fastmcp.server.dependencies import get_access_token
@@ -140,7 +140,7 @@ async def get_user_info() -> dict:
         db.close()
 
 
-@weather_mcp.tool(auth=require_local_admin)
+@weather_mcp.tool()
 async def only_tool() -> str:
     """Example admin-only tool."""
     return "message is 299."

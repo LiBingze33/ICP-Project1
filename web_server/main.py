@@ -155,9 +155,9 @@ async def logout(request: Request):
 async def chat(req: ChatRequest, request: Request):
     try:
         #check if the user is logged in and have a session
-        user = request.session.get("user")
+        session_user = request.session.get("user")
 
-        if not user:
+        if not session_user:
             return {"error": "Please log in with GitHub before using the tools."}
         #do not solely trust the session
         # reply = await run_agent(req.message, user, req.backend)

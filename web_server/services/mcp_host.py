@@ -1,9 +1,11 @@
 import json
 import os
+import time
+import jwt
 from dotenv import load_dotenv
 from fastmcp import Client
 from openai import OpenAI
-
+from fastmcp.client.transports import StreamableHttpTransport
 load_dotenv()
 
 TOOL_POLICIES = {
@@ -42,7 +44,9 @@ MCP_URL = "http://127.0.0.1:9000/mcp"
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "anthropic/claude-sonnet-4.5")
-
+INTERNAL_JWT_SECRET = os.getenv("INTERNAL_JWT_SECRET")
+if not INTERNAL_JWT_SECRET:
+    raise RuntimeError("INTERNAL_JWT_SECRET is missing from .env")
 ollama_client = OpenAI(
     base_url=OLLAMA_BASE_URL,
     api_key="ollama",
@@ -177,6 +181,40 @@ def call_llm(messages, available_tools, backend="openrouter", max_tokens=500):
 
     return result
 
+
+def create_internal_mcp_jwt(user: dict) -> str:
+    """
+    Create a short-lived JWT for backend-to-MCP communication.
+    This token is only used between mcp_host.py and the MCP server.
+    It should never be sent to the browser or the LLM.
+    """
+    now = int(time.time())
+
+    payload = {
+        # Who created this token
+        "iss": "fastapi-web",
+
+        # Who this token is intended for
+        "aud": "mcp-server",
+
+        # Internal service name
+        "sub": "mcp-host",
+
+        # User context for logging/auditing
+        "user_id": str(user.get("user_id")),
+        "github_login": user.get("login"),
+        "role": user.get("role", "user"),
+
+        # Token timing only valid for 60s
+        "iat": now,
+        "exp": now + 60,
+    }
+
+    return jwt.encode(payload, INTERNAL_JWT_SECRET, algorithm="HS256")
+
+
+
+
 async def run_agent(user_message: str, user: dict,backend: str = "openrouter") -> str:
     """
     user comes from FastAPI session after GitHub OAuth login.
@@ -199,8 +237,26 @@ async def run_agent(user_message: str, user: dict,backend: str = "openrouter") -
     # No FastMCP OAuth here.
     # FastAPI already authenticated the user.
     # MCP is internal on 127.0.0.1.
-    mcp_client_cm = Client(MCP_URL)
+    # mcp_client_cm = Client(MCP_URL)
+    # internal_jwt = create_internal_mcp_jwt(user)
 
+    # mcp_client_cm = Client(
+    #     MCP_URL,
+    #     headers={
+    #         "Authorization": f"Bearer {internal_jwt}",
+    #     },
+    # )
+    #Client() only reveicves the connection/transport object, the HTTP-specific settings such as the headers, belong to the HTTP transport
+    internal_jwt = create_internal_mcp_jwt(user)
+
+    transport = StreamableHttpTransport(
+        MCP_URL,
+        headers={
+            "Authorization": f"Bearer {internal_jwt}",
+        },
+    )
+
+    mcp_client_cm = Client(transport)
     async with mcp_client_cm as mcp_client:
         # 1. Get prompt from MCP server
         prompt_result = await mcp_client.get_prompt(prompt_name)
