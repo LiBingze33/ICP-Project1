@@ -25,7 +25,7 @@ app.add_middleware(
     #Allow normal login, but do not send cookie everywhere
     same_site="lax",
     #make sure the session cookie is only sent over HTTPs
-    # https_only=True,
+    https_only=True,
 )
 
 oauth = OAuth()
@@ -136,8 +136,8 @@ async def auth_callback(request: Request):
             "login": user.github_login,
             "github_id": github_id,
             "avatar_url": avatar_url,
-            "role": user.role,
-            "workspace_path": user.workspace_path,
+            # "role": user.role,
+            # "workspace_path": user.workspace_path,
 
         }
     finally:
@@ -155,16 +155,46 @@ async def logout(request: Request):
 async def chat(req: ChatRequest, request: Request):
     try:
         #check if the user is logged in and have a session
-        user = request.session.get("user")
+        session_user = request.session.get("user")
 
-        if not user:
+        if not session_user:
             return {"error": "Please log in with GitHub before using the tools."}
+        #do not solely trust the session
+        # reply = await run_agent(req.message, user, req.backend)
 
-        reply = await run_agent(req.message, user, req.backend)
-        return {
-            "reply": reply,
-            "backend_used": req.backend,
-}
+        #Check wether the session contains a valid identity value
+        github_login = session_user.get("login")
+        if not github_login:
+            #clear the session
+            request.session.clear()
+            return{"error":"Invalid session. Please login again"}
 
+        #Database user validation
+        #Check whether the logged-in GitHub user still exist
+        db = SessionLocal()
+        try:
+            db_user = db.query(User).filter(User.github_login == github_login).first()
+
+            if not db_user:
+                request.session.clear()
+                return {"error": "User no longer exists. Please log in again."}
+
+
+            #Create a user text from the database
+            #Avoids simply trusting role/worksapce from the session
+            trusted_user = {
+            "user_id": db_user.user_id,
+            "login": db_user.github_login,
+            "role": db_user.role,
+            "workspace_path": db_user.workspace_path,
+            }
+            reply = await run_agent(req.message, trusted_user, req.backend)
+
+            return {
+                "reply": reply,
+                "backend_used": req.backend,
+            }
+        finally:
+            db.close()
     except Exception as e:
         return {"error": str(e)}
