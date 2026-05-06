@@ -1,5 +1,6 @@
 import json
 import os
+import re
 
 from dotenv import load_dotenv
 from fastmcp import Client
@@ -8,6 +9,7 @@ from fastmcp.client.auth import OAuth
 from key_value.aio.stores.disk import DiskStore
 from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
 from cryptography.fernet import Fernet
+from middleware.file_middleware import FileMiddleware
 
 load_dotenv()
 
@@ -50,12 +52,25 @@ def extract_tool_text(tool_result) -> str:
 def choose_context(user_message: str) -> tuple[str, set[str]]:
     text = user_message.lower()
 
-    if "file" in text or "read" in text or ".txt" in text or ".md" in text:
+    file_keywords = {
+        "file",
+        "read",
+        "create",
+        "delete",
+        "remove",
+        "list",
+        "path",
+        "show",
+        "write",
+    }
+
+    if any(keyword in text for keyword in file_keywords) or ".txt" in text or ".md" in text:
         return "files_file_style", {
             "files_list_files",
             "files_read_file",
             "files_create_file",
             "files_delete_file",
+            "files_show_file_path",
         }
 
     return "weather_bing_weather_style", {
@@ -66,10 +81,27 @@ def choose_context(user_message: str) -> tuple[str, set[str]]:
     }
 
 
+def is_file_action_request(user_message: str) -> bool:
+    text = user_message.lower()
+    return any(keyword in text for keyword in ("create", "read", "delete", "list")) or ".txt" in text or ".md" in text
+
+
+def has_explicit_delete_confirmation(user_message: str) -> bool:
+    text = user_message.lower()
+    return bool(
+        re.search(r"\bconfirm\s*=?\s*true\b", text)
+        or re.search(r"\bconfirmed\b", text)
+    )
+
+
 async def run_agent(user_message: str) -> str:
     # user_id is kept for compatibility with your current route,
     # but OAuth now handles identity at the MCP server side.
     prompt_name, allowed_tools = choose_context(user_message)
+
+    # Block unsafe file payloads before the LLM can claim a file was created.
+    if prompt_name == "files_file_style":
+        FileMiddleware.reject_unsafe_text(user_message)
 
     mcp_client_cm = Client(MCP_URL, auth=oauth)
 
@@ -117,8 +149,12 @@ async def run_agent(user_message: str) -> str:
         if msg.content:
             final_parts.append(msg.content)
 
+        if prompt_name == "files_file_style" and is_file_action_request(user_message) and not msg.tool_calls:
+            raise ValueError("File request was not executed because no file tool call was made.")
+
         # 5. Execute tool calls if any
         if msg.tool_calls:
+            tool_outputs = []
             messages.append(
                 {
                     "role": "assistant",
@@ -173,9 +209,20 @@ async def run_agent(user_message: str) -> str:
                     if not isinstance(content, str):
                         raise ValueError("Invalid file content.")
 
+                if tool_name == "files_delete_file":
+                    if not has_explicit_delete_confirmation(user_message):
+                        raise ValueError(
+                            "Delete requests must explicitly include 'confirm true'."
+                        )
+                    if tool_args.get("confirm") is not True:
+                        raise ValueError(
+                            "Delete tool call was rejected because confirm=True was not passed."
+                        )
+
                 # Call MCP tool
                 tool_result = await mcp_client.call_tool(tool_name, tool_args)
                 tool_text = extract_tool_text(tool_result)
+                tool_outputs.append(tool_text)
 
                 messages.append(
                     {
@@ -184,6 +231,10 @@ async def run_agent(user_message: str) -> str:
                         "content": tool_text,
                     }
                 )
+
+            # Return the exact file tool output to avoid LLM hallucinating success.
+            if prompt_name == "files_file_style":
+                return "\n".join(part for part in tool_outputs if part).strip()
 
             # 6. Second LLM call with tool outputs
             second = llm_client.chat.completions.create(

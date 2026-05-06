@@ -1,12 +1,19 @@
 from pathlib import Path
+
 from fastmcp import FastMCP
+
+from database.db import Base, SessionLocal, engine
+from database.model import OwnedFile
 from middleware import FileMiddleware
+from middleware.auth import get_current_local_user_identity
 
 file_mcp = FastMCP("file_server")
 
 BASE_DIR = Path(__file__).parent / "demo_docs"
 BASE_DIR.mkdir(exist_ok=True)
-file_mcp.add_middleware(FileMiddleware(workspace_root=BASE_DIR))
+Base.metadata.create_all(bind=engine)
+file_security = FileMiddleware(workspace_root=BASE_DIR)
+file_mcp.add_middleware(file_security)
 
 
 def safe_path(filename: str) -> Path | None:
@@ -14,6 +21,27 @@ def safe_path(filename: str) -> Path | None:
     if not filename or Path(filename).is_absolute() or "/" in filename or "\\" in filename or ".." in filename:
         return None
     return BASE_DIR / filename
+
+
+def owned_storage_dir(user_id: int) -> Path:
+    path = BASE_DIR / "_owned" / f"user_{user_id}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def owned_storage_path(user_id: int, filename: str) -> Path:
+    return owned_storage_dir(user_id) / filename
+
+
+def get_owned_file_record(db, user_id: int, logical_name: str) -> OwnedFile | None:
+    return (
+        db.query(OwnedFile)
+        .filter(
+            OwnedFile.owner_user_id == user_id,
+            OwnedFile.logical_name == logical_name,
+        )
+        .first()
+    )
 
 
 @file_mcp.prompt()
@@ -27,64 +55,155 @@ async def file_style() -> str:
 
 @file_mcp.tool()
 async def list_files() -> str:
-    """List files in the demo_docs folder."""
-    files = [p.name for p in BASE_DIR.iterdir() if p.is_file()]
-    return "No files found." if not files else "\n".join(files)
+    """List only the current user's files."""
+    user = get_current_local_user_identity()
+    db = SessionLocal()
+    try:
+        records = (
+            db.query(OwnedFile)
+            .filter(OwnedFile.owner_user_id == user["user_id"])
+            .order_by(OwnedFile.logical_name.asc())
+            .all()
+        )
+
+        files: list[str] = []
+        stale_records: list[OwnedFile] = []
+        for record in records:
+            storage_path = owned_storage_path(user["user_id"], record.logical_name)
+            if storage_path.is_file():
+                files.append(record.logical_name)
+            else:
+                stale_records.append(record)
+
+        if stale_records:
+            for record in stale_records:
+                db.delete(record)
+            db.commit()
+
+        return "No files found." if not files else "\n".join(files)
+    finally:
+        db.close()
 
 
 @file_mcp.tool()
 async def read_file(filename: str) -> str:
-    """Read a file from the demo_docs folder."""
+    """Read a file owned by the current user."""
     path = safe_path(filename)
     if path is None:
         return "Invalid filename."
 
-    if not path.exists():
-        return f"File '{filename}' does not exist."
-
-    if not path.is_file():
-        return f"'{filename}' is not a file."
-
+    logical_name = path.name
+    user = get_current_local_user_identity()
+    db = SessionLocal()
     try:
-        return path.read_text(encoding="utf-8")
-    except Exception:
-        return f"Unable to read file '{filename}'."
+        record = get_owned_file_record(db, user["user_id"], logical_name)
+        if record is None:
+            return f"File '{logical_name}' does not exist."
+
+        storage_path = owned_storage_path(user["user_id"], logical_name)
+        if not storage_path.exists() or not storage_path.is_file():
+            db.delete(record)
+            db.commit()
+            return f"File '{logical_name}' does not exist."
+
+        try:
+            return storage_path.read_text(encoding="utf-8")
+        except Exception:
+            return f"Unable to read file '{logical_name}'."
+    finally:
+        db.close()
 
 
 @file_mcp.tool()
 async def create_file(filename: str, content: str) -> str:
-    """Create a file inside the demo_docs folder."""
+    """Create a file owned by the current user."""
     path = safe_path(filename)
     if path is None:
         return "Invalid filename."
 
-    if path.exists():
-        return f"File '{filename}' already exists."
-
+    logical_name = path.name
+    storage_path = None
+    db = SessionLocal()
     try:
-        path.write_text(content, encoding="utf-8")
-        return f"File '{filename}' created successfully."
+        user = get_current_local_user_identity()
+        if get_owned_file_record(db, user["user_id"], logical_name) is not None:
+            return f"File '{logical_name}' already exists."
+
+        file_security.reject_unsafe_text(logical_name)
+        file_security.reject_unsafe_text(content)
+
+        storage_path = owned_storage_path(user["user_id"], logical_name)
+        if storage_path.exists():
+            return f"File '{logical_name}' already exists."
+
+        storage_path.write_text(content, encoding="utf-8")
+        db.add(
+            OwnedFile(
+                owner_user_id=user["user_id"],
+                logical_name=logical_name,
+            )
+        )
+        db.commit()
+        return f"File '{logical_name}' created successfully."
+    except ValueError as exc:
+        if storage_path is not None and storage_path.exists():
+            storage_path.unlink()
+        db.rollback()
+        return f"Blocked unsafe file request: {exc}"
     except Exception:
-        return f"Unable to create file '{filename}'."
+        if storage_path is not None and storage_path.exists():
+            storage_path.unlink()
+        db.rollback()
+        return f"Unable to create file '{logical_name}'."
+    finally:
+        db.close()
+
+
+@file_mcp.tool()
+async def show_file_path(filename: str) -> str:
+    """Show the current user's resolved storage path for a file."""
+    path = safe_path(filename)
+    if path is None:
+        return "Invalid filename."
+
+    logical_name = path.name
+    user = get_current_local_user_identity()
+    resolved = owned_storage_path(user["user_id"], logical_name).resolve()
+    if resolved.exists():
+        return f"Resolved file path: {resolved}"
+    return f"Resolved file path: {resolved} (file does not exist yet)"
 
 
 @file_mcp.tool()
 async def delete_file(filename: str, confirm: bool = False) -> str:
-    """Delete a file from the demo_docs folder."""
+    """Delete a file owned by the current user."""
     if confirm is not True:
         return "Deletion not confirmed. Set 'confirm' to true to delete the file."
+
     path = safe_path(filename)
     if path is None:
         return "Invalid filename."
 
-    if not path.exists():
-        return f"File '{filename}' does not exist."
-
-    if not path.is_file():
-        return f"'{filename}' is not a file."
-
+    logical_name = path.name
+    user = get_current_local_user_identity()
+    db = SessionLocal()
     try:
-        path.unlink()
-        return f"File '{filename}' deleted successfully."
+        record = get_owned_file_record(db, user["user_id"], logical_name)
+        if record is None:
+            return f"File '{logical_name}' does not exist."
+
+        storage_path = owned_storage_path(user["user_id"], logical_name)
+        if storage_path.exists() and not storage_path.is_file():
+            return f"'{logical_name}' is not a file."
+
+        if storage_path.exists():
+            storage_path.unlink()
+
+        db.delete(record)
+        db.commit()
+        return f"File '{logical_name}' deleted successfully."
     except Exception:
-        return f"Unable to delete file '{filename}'."
+        db.rollback()
+        return f"Unable to delete file '{logical_name}'."
+    finally:
+        db.close()

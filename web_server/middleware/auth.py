@@ -1,5 +1,6 @@
 #AuthContext is the object during auth checks, it contains token informations
 from fastmcp.server.auth import AuthContext
+from fastmcp.server.dependencies import get_access_token
 #Need the database sesson to make query
 from database.db import SessionLocal
 #Import the User model class
@@ -66,3 +67,21 @@ def require_local_admin(ctx: AuthContext) -> bool:
     user = get_or_create_user_from_github(github_login, email)
 
     return user is not None and user.role == "admin"
+
+
+def get_current_local_user_identity() -> dict[str, str | int | None]:
+    """Return the currently authenticated user as simple serializable fields."""
+    token = get_access_token()
+    github_login = token.claims.get("login")
+    if not github_login:
+        raise PermissionError("Authenticated GitHub login required.")
+
+    email = token.claims.get("email")
+    user = get_or_create_user_from_github(github_login, email)
+
+    return {
+        "user_id": user.user_id,
+        "github_login": user.github_login,
+        "email": user.email,
+        "role": user.role,
+    }
