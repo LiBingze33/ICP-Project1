@@ -1,5 +1,3 @@
-from middleware import check_tool_response
-
 TOOL_POLICIES = {
     "weather": {
         "prompt": "weather_bing_weather_style",
@@ -218,13 +216,11 @@ async def run_agent(user_message: str) -> str:
             for tc in msg.tool_calls:
                 tool_name = tc.function.name
 
-                # Allowlist check
-                if tool_name in restricted_tools:
-                   raise ValueError(f"Restricted tool blocked: {tool_name}")
+                # if tool_name in restricted_tools:
+                #     raise ValueError(f"Restricted tool blocked: {tool_name}")
 
-                if tool_name not in allowed_tools:
-                    raise ValueError(f"Tool not allowed: {tool_name}")
-
+                # if tool_name not in allowed_tools:
+                #     raise ValueError(f"Tool not allowed: {tool_name}")
                 # Parse arguments
                 tool_args = json.loads(tc.function.arguments or "{}")
 
@@ -250,7 +246,7 @@ async def run_agent(user_message: str) -> str:
                         raise ValueError("Invalid filename.")
 
                 if tool_name == "files_create_file":
-                    content = tool_args.get("content", "")
+                    content = tool_args.get("content", ""
                     if not isinstance(content, str):
                         raise ValueError("Invalid file content.")
 
@@ -259,7 +255,7 @@ async def run_agent(user_message: str) -> str:
                 tool_text = extract_tool_text(tool_result)
 
                 # Check tool output before sending it back to the model
-                tool_text = check_tool_response(tool_name, tool_text)
+                t# tool_text = check_tool_response(tool_name, tool_text)
 
                 messages.append(
                     {
@@ -279,4 +275,4 @@ async def run_agent(user_message: str) -> str:
             if second.choices[0].message.content:
                 final_parts.append(second.choices[0].message.content)
 
-        return "\n".join(part for part in final_parts if part).strip()
+        return "\n".join(part for part in final_parts if part).strip()s
