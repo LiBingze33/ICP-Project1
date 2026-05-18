@@ -42,7 +42,7 @@
     <script>
         async function sendMsg() {
             const message = document.getElementById("msg").value;
-            document.getElementById("out").textContent = "Waiting for reply.......";
+            document.getElementById("out").innerHTML = "Waiting for reply.......";
 
             const res = await fetch("/chat", {
                 method: "POST",
@@ -51,7 +51,7 @@
             });
 
             const data = await res.json();
-            document.getElementById("out").textContent = data.reply || data.error || "No response";
+            document.getElementById("out").innerHTML = data.reply || data.error || "No response";
         }
     </script>
 </body>

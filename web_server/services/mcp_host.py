@@ -17,9 +17,9 @@ TOOL_POLICIES = {
             "files_list_files",
             "files_read_file",
             "files_create_file",
+            "files_delete_file",
         },
         "restricted_tools": {
-            "files_delete_file",
         },
     },
 }
@@ -246,7 +246,7 @@ async def run_agent(user_message: str) -> str:
                         raise ValueError("Invalid filename.")
 
                 if tool_name == "files_create_file":
-                    content = tool_args.get("content", ""
+                    content = tool_args.get("content", "")
                     if not isinstance(content, str):
                         raise ValueError("Invalid file content.")
 
@@ -255,7 +255,7 @@ async def run_agent(user_message: str) -> str:
                 tool_text = extract_tool_text(tool_result)
 
                 # Check tool output before sending it back to the model
-                t# tool_text = check_tool_response(tool_name, tool_text)
+                # tool_text = check_tool_response(tool_name, tool_text)
 
                 messages.append(
                     {
@@ -275,4 +275,4 @@ async def run_agent(user_message: str) -> str:
             if second.choices[0].message.content:
                 final_parts.append(second.choices[0].message.content)
 
-        return "\n".join(part for part in final_parts if part).strip()s
+        return "\n".join(part for part in final_parts if part).strip()

@@ -1,2 +1,0 @@
-My password is 123456.
-OPENROUTER_API_KEY is abc.
