@@ -2,6 +2,8 @@ import json
 import os
 import time
 import jwt
+import asyncio
+from pathlib import Path
 from dotenv import load_dotenv
 from fastmcp import Client
 from openai import OpenAI
@@ -213,42 +215,38 @@ def create_internal_mcp_jwt(user: dict) -> str:
     return jwt.encode(payload, INTERNAL_JWT_SECRET, algorithm="HS256")
 
 
+async def emit_log(emit, message: str):
+    if emit:
+        await emit(message)
+        await asyncio.sleep(0.5)
 
-
-async def run_agent(user_message: str, user: dict,backend: str = "openrouter") -> str:
+async def run_agent(user_message: str, user: dict, backend: str = "openrouter", emit=None) -> str:
     """
     user comes from FastAPI session after GitHub OAuth login.
-
-    Example:
-    {
-        "user_id": 1,
-        "login": "github_username",
-        "email": "...",
-        "role": "user"
-    }
     """
+    await emit_log(emit, "Agent started.")
+
     github_login = user.get("login", "unknown_user")
     role = user.get("role", "user")
 
+    await emit_log(emit, f"Authenticated user loaded: {github_login}")
+    await emit_log(emit, f"User role loaded: {role}")
+
+    await emit_log(emit, "Classifying user request into policy category.")
     prompt_name, allowed_tools = choose_context(user_message, backend=backend)
-    # Apply authorization based on logged-in user's role
+
+    await emit_log(emit, f"Selected MCP prompt: {prompt_name}")
+    await emit_log(emit, f"Tools allowed by selected policy: {sorted(list(allowed_tools))}")
+
+    await emit_log(emit, "Applying role-based tool filtering.")
     allowed_tools = filter_tools_by_user_role(allowed_tools, user)
 
-    # No FastMCP OAuth here.
-    # FastAPI already authenticated the user.
-    # MCP is internal on 127.0.0.1.
-    # mcp_client_cm = Client(MCP_URL)
-    # internal_jwt = create_internal_mcp_jwt(user)
+    await emit_log(emit, f"Tools allowed after role check: {sorted(list(allowed_tools))}")
 
-    # mcp_client_cm = Client(
-    #     MCP_URL,
-    #     headers={
-    #         "Authorization": f"Bearer {internal_jwt}",
-    #     },
-    # )
-    #Client() only reveicves the connection/transport object, the HTTP-specific settings such as the headers, belong to the HTTP transport
+    await emit_log(emit, "Creating internal JWT for FastAPI-to-MCP communication.")
     internal_jwt = create_internal_mcp_jwt(user)
 
+    await emit_log(emit, "Creating MCP HTTP transport with internal authorization token.")
     transport = StreamableHttpTransport(
         MCP_URL,
         headers={
@@ -257,12 +255,21 @@ async def run_agent(user_message: str, user: dict,backend: str = "openrouter") -
     )
 
     mcp_client_cm = Client(transport)
+
+    await emit_log(emit, "Connecting to MCP server.")
+
     async with mcp_client_cm as mcp_client:
+        await emit_log(emit, "MCP connection established.")
+
         # 1. Get prompt from MCP server
+        await emit_log(emit, f"Loading MCP prompt: {prompt_name}")
         prompt_result = await mcp_client.get_prompt(prompt_name)
+        await emit_log(emit, "MCP prompt loaded.")
 
         # 2. Build messages
+        await emit_log(emit, "Building messages for the model.")
         messages = []
+
         for m in prompt_result.messages:
             text = getattr(m.content, "text", None)
             if text:
@@ -279,10 +286,15 @@ async def run_agent(user_message: str, user: dict,backend: str = "openrouter") -
             }
         )
 
+        await emit_log(emit, "Messages prepared.")
+
         # 3. Get only allowed tools
+        await emit_log(emit, "Requesting available tools from MCP server.")
         tools_result = await mcp_client.list_tools()
+        await emit_log(emit, f"MCP server returned {len(tools_result)} tools.")
 
         available_tools = []
+
         for tool in tools_result:
             if tool.name in allowed_tools:
                 available_tools.append(
@@ -296,22 +308,30 @@ async def run_agent(user_message: str, user: dict,backend: str = "openrouter") -
                     }
                 )
 
+        available_tool_names = [t["function"]["name"] for t in available_tools]
+        await emit_log(emit, f"Tools exposed to model: {available_tool_names}")
+
         # 4. First LLM call
+        await emit_log(emit, f"Calling LLM backend: {backend}")
         first = call_llm(
             messages=messages,
             available_tools=available_tools,
             backend=backend,
             max_tokens=500,
         )
+        await emit_log(emit, "First LLM response received.")
 
         msg = first.choices[0].message
         final_parts = []
 
         if msg.content:
+            await emit_log(emit, "LLM returned text content.")
             final_parts.append(msg.content)
 
         # 5. Execute tool calls if any
         if msg.tool_calls:
+            await emit_log(emit, f"LLM requested {len(msg.tool_calls)} tool call(s).")
+
             messages.append(
                 {
                     "role": "assistant",
@@ -333,17 +353,29 @@ async def run_agent(user_message: str, user: dict,backend: str = "openrouter") -
             for tc in msg.tool_calls:
                 tool_name = tc.function.name
 
+                await emit_log(emit, f"Tool requested by model: {tool_name}")
+                await emit_log(emit, "Checking tool against allowlist.")
+
                 # Allowlist check
                 if tool_name not in allowed_tools:
+                    await emit_log(emit, f"Tool blocked: {tool_name}")
                     raise ValueError(f"Tool not allowed for this user: {tool_name}")
 
+                await emit_log(emit, f"Tool allowed: {tool_name}")
+
                 # Parse arguments
+                await emit_log(emit, "Parsing tool arguments.")
                 tool_args = json.loads(tc.function.arguments or "{}")
 
+                await emit_log(emit, f"Raw tool arguments: {tool_args}")
+
                 # Input validation
+                await emit_log(emit, "Running pre-tool input validation.")
+
                 if tool_name == "weather_get_alerts":
                     state = tool_args.get("state", "")
                     if not isinstance(state, str) or len(state.strip()) != 2:
+                        await emit_log(emit, "Validation failed: invalid state code.")
                         raise ValueError("Invalid state code.")
 
                 if tool_name == "weather_get_forecast":
@@ -354,14 +386,16 @@ async def run_agent(user_message: str, user: dict,backend: str = "openrouter") -
                         lat = float(lat)
                         lon = float(lon)
                     except (TypeError, ValueError):
+                        await emit_log(emit, "Validation failed: invalid coordinates.")
                         raise ValueError("Invalid coordinates.")
 
                     if not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
+                        await emit_log(emit, "Validation failed: coordinates out of range.")
                         raise ValueError("Coordinates out of range.")
 
                     tool_args["latitude"] = lat
                     tool_args["longitude"] = lon
-                    
+
                 if tool_name in {
                     "files_read_file",
                     "files_create_file",
@@ -369,13 +403,15 @@ async def run_agent(user_message: str, user: dict,backend: str = "openrouter") -
                 }:
                     filename = tool_args.get("filename", "")
                     if not isinstance(filename, str) or not filename.strip():
+                        await emit_log(emit, "Validation failed: invalid filename.")
                         raise ValueError("Invalid filename.")
 
                 if tool_name == "files_create_file":
                     content = tool_args.get("content", "")
                     if not isinstance(content, str):
+                        await emit_log(emit, "Validation failed: invalid file content.")
                         raise ValueError("Invalid file content.")
-                # This makes sure file tools only use the current user's private folder.
+
                 if tool_name in {
                     "files_list_files",
                     "files_read_file",
@@ -385,12 +421,21 @@ async def run_agent(user_message: str, user: dict,backend: str = "openrouter") -
                     workspace_path = user.get("workspace_path")
 
                     if not workspace_path:
+                        await emit_log(emit, "Validation failed: missing workspace path.")
                         raise ValueError("User workspace path was not found in session.")
 
                     tool_args["workspace_path"] = workspace_path
+                    await emit_log(emit, f"Workspace path injected into tool arguments: /{Path(workspace_path).name}")
+                await emit_log(emit, "Pre-tool validation passed.")
+                await emit_log(emit, f"Calling MCP tool: {tool_name}")
+
                 # Call MCP tool internally
                 tool_result = await mcp_client.call_tool(tool_name, tool_args)
+
+                await emit_log(emit, f"MCP tool finished: {tool_name}")
+
                 tool_text = extract_tool_text(tool_result)
+                await emit_log(emit, "Tool result extracted and prepared for model.")
 
                 messages.append(
                     {
@@ -401,14 +446,20 @@ async def run_agent(user_message: str, user: dict,backend: str = "openrouter") -
                 )
 
             # 6. Second LLM call with tool outputs
+            await emit_log(emit, "Calling LLM again with tool result.")
             second = call_llm(
                 messages=messages,
                 available_tools=available_tools,
                 backend=backend,
                 max_tokens=500,
             )
+            await emit_log(emit, "Second LLM response received.")
 
             if second.choices[0].message.content:
                 final_parts.append(second.choices[0].message.content)
 
+        else:
+            await emit_log(emit, "No tool call requested by the model.")
+
+        await emit_log(emit, "Final response generated.")
         return "\n".join(part for part in final_parts if part).strip()

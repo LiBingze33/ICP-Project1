@@ -1,9 +1,10 @@
 import os
-
+import json
+import asyncio
 from authlib.integrations.starlette_client import OAuth
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
@@ -17,7 +18,7 @@ load_dotenv()
 BASE_WORKSPACE_DIR = Path("user_workspaces").resolve()
 app = FastAPI()
 #add session support to the FastAPI app, so the app can remember who logged in
-#This add a middleware layer to the web app
+#This add a middleware layer to the web app which is a built in feature
 app.add_middleware(
     SessionMiddleware,
     #keys to protect the session cookie, so users cannot fake their login
@@ -26,8 +27,8 @@ app.add_middleware(
     same_site="lax",
     #make sure the session cookie is only sent over HTTPs
     https_only=True,
+    max_age=60 * 60 * 2  # 2 hours)
 )
-
 oauth = OAuth()
 #https://docs.authlib.org/en/v1.7.0/oauth2/client/web/flask.html
 oauth.register(
@@ -35,9 +36,9 @@ oauth.register(
     client_id=os.getenv("GITHUB_CLIENT_ID"),
     client_secret=os.getenv("GITHUB_CLIENT_SECRET"),
     #https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps
-    #the app sends the browser so the user can login
+    #backend sends the returned code here to get the access token
     access_token_url="https://github.com/login/oauth/access_token",
-    #backend sends the retuened code to get the access token
+    #the app sends the browser so the user can login
     authorize_url="https://github.com/login/oauth/authorize",
     #for the convenience to to simplify the base url
     api_base_url="https://api.github.com/",
@@ -74,6 +75,7 @@ async def home(req: Request):
 @app.get("/login")
 async def login(request: Request):
     redirect_uri = "http://127.0.0.1:8000/auth/callback"
+    #Authlib builds the Github Login URL
     return await oauth.github.authorize_redirect(request, redirect_uri)
 
 
@@ -95,10 +97,13 @@ async def auth_callback(request: Request):
     
     
     # Create a stable workspace folder for this GitHub user
-    workspace_path = BASE_WORKSPACE_DIR / f"github_{github_login}"
-    workspace_path.mkdir(parents=True, exist_ok=True)
-
-    
+    # workspace_path = BASE_WORKSPACE_DIR / f"github_{github_login}"
+    # workspace_path.mkdir(parents=True, exist_ok=True)
+    workspace_folder = f"github_{github_login}"
+    full_workspace_path = BASE_WORKSPACE_DIR / workspace_folder
+    full_workspace_path.mkdir(parents=True, exist_ok=True)
+    #does not show the root path
+    workspace_path=workspace_folder
     
     
     # Save or update user in local database
@@ -111,7 +116,7 @@ async def auth_callback(request: Request):
                 github_login=github_login,
                 email=None,
                 role="user",
-                workspace_path=str(workspace_path),
+                workspace_path=workspace_folder,
 
             )
             db.add(user)
@@ -122,8 +127,8 @@ async def auth_callback(request: Request):
         else:
             # Always make sure the stored workspace path matches the current GitHub login.
             # Update worksapce if necessary
-            if user.workspace_path != str(workspace_path):
-                user.workspace_path = str(workspace_path)
+            if user.workspace_path != workspace_folder:
+                user.workspace_path = workspace_folder
                 db.commit()
                 db.refresh(user)
 
@@ -142,7 +147,7 @@ async def auth_callback(request: Request):
         }
     finally:
         db.close()
-
+    #go back to home page
     return RedirectResponse(url="/")
 
 @app.get("/logout")
@@ -151,50 +156,207 @@ async def logout(request: Request):
     return RedirectResponse(url="/")
 
 
-@app.post("/chat")
-async def chat(req: ChatRequest, request: Request):
-    try:
-        #check if the user is logged in and have a session
-        session_user = request.session.get("user")
+# @app.post("/chat")
+# async def chat(req: ChatRequest, request: Request):
+#     try:
+#         #check if the user is logged in and have a session
+#         session_user = request.session.get("user")
 
-        if not session_user:
-            return {"error": "Please log in with GitHub before using the tools."}
-        #do not solely trust the session
-        # reply = await run_agent(req.message, user, req.backend)
+#         if not session_user:
+#             return {"error": "Please log in with GitHub before using the tools."}
+#         #do not solely trust the session
+#         # reply = await run_agent(req.message, user, req.backend)
 
-        #Check wether the session contains a valid identity value
-        github_login = session_user.get("login")
-        if not github_login:
-            #clear the session
-            request.session.clear()
-            return{"error":"Invalid session. Please login again"}
+#         #Check wether the session contains a valid identity value
+#         github_login = session_user.get("login")
+#         if not github_login:
+#             #clear the session
+#             request.session.clear()
+#             return{"error":"Invalid session. Please login again"}
 
-        #Database user validation
-        #Check whether the logged-in GitHub user still exist
-        db = SessionLocal()
+#         #Database user validation
+#         #Check whether the logged-in GitHub user still exist
+#         db = SessionLocal()
+#         try:
+#             db_user = db.query(User).filter(User.github_login == github_login).first()
+
+#             if not db_user:
+#                 request.session.clear()
+#                 return {"error": "User no longer exists. Please log in again."}
+
+
+#             #Create a user text from the database
+#             #Avoids simply trusting role/worksapce from the session
+#             trusted_user = {
+#             "user_id": db_user.user_id,
+#             "login": db_user.github_login,
+#             "role": db_user.role,
+#             #the file tool still need full path internally
+#             "workspace_path": str((BASE_WORKSPACE_DIR / db_user.workspace_path).resolve()),
+#             }
+#             reply = await run_agent(req.message, trusted_user, req.backend)
+
+#             return {
+#                 "reply": reply,
+#                 "backend_used": req.backend,
+#             }
+#         finally:
+#             db.close()
+#     except Exception as e:
+#         return {"error": str(e)}
+    
+@app.post("/chat-stream")
+async def chat_stream(req: ChatRequest, request: Request):
+
+    async def generate_logs():
         try:
-            db_user = db.query(User).filter(User.github_login == github_login).first()
+            #send the message to the frontend, but do not finish the whole response
+            #json.dumps convert python dictonary into Json Text
+            #data is for SSE streaming
+            #https://fastapi.tiangolo.com/advanced/stream-data/
+            
+            yield "data: " + json.dumps({
+                "type": "log",
+                "content": "Request received from frontend."
+            }) + "\n\n"
+            await asyncio.sleep(0.5)
 
-            if not db_user:
+            yield "data: " + json.dumps({
+                "type": "log",
+                "content": f"Selected backend: {req.backend}"
+            }) + "\n\n"
+            await asyncio.sleep(0.5)
+
+            # Check login session
+            session_user = request.session.get("user")
+
+            if not session_user:
+                yield "data: " + json.dumps({
+                    "type": "error",
+                    "content": "Please log in with GitHub before using the tools."
+                }) + "\n\n"
+                return
+
+            yield "data: " + json.dumps({
+                "type": "log",
+                "content": "Session check passed. User is logged in."
+            }) + "\n\n"
+            await asyncio.sleep(0.5)
+
+            # Check whether the session contains GitHub login
+            github_login = session_user.get("login")
+
+            if not github_login:
                 request.session.clear()
-                return {"error": "User no longer exists. Please log in again."}
+                yield "data: " + json.dumps({
+                    "type": "error",
+                    "content": "Invalid session. Please login again."
+                }) + "\n\n"
+                return
 
+            yield "data: " + json.dumps({
+                "type": "log",
+                "content": f"GitHub login found: {github_login}"
+            }) + "\n\n"
+            await asyncio.sleep(0.5)
 
+            # Database validation
+            db = SessionLocal()
+
+            try:
+                yield "data: " + json.dumps({
+                    "type": "log",
+                    "content": "Checking user in local database."
+                }) + "\n\n"
+                await asyncio.sleep(0.5)
+
+                db_user = db.query(User).filter(User.github_login == github_login).first()
+
+                if not db_user:
+                    request.session.clear()
+                    yield "data: " + json.dumps({
+                        "type": "error",
+                        "content": "User no longer exists. Please log in again."
+                    }) + "\n\n"
+                    return
             #Create a user text from the database
             #Avoids simply trusting role/worksapce from the session
-            trusted_user = {
-            "user_id": db_user.user_id,
-            "login": db_user.github_login,
-            "role": db_user.role,
-            "workspace_path": db_user.workspace_path,
-            }
-            reply = await run_agent(req.message, trusted_user, req.backend)
+                trusted_user = {
+                    "user_id": db_user.user_id,
+                    "login": db_user.github_login,
+                    "role": db_user.role,
+                    "workspace_path": str((BASE_WORKSPACE_DIR / db_user.workspace_path).resolve()),
 
-            return {
-                "reply": reply,
-                "backend_used": req.backend,
-            }
-        finally:
-            db.close()
-    except Exception as e:
-        return {"error": str(e)}
+                }
+
+                yield "data: " + json.dumps({
+                    "type": "log",
+                    "content": f"Database validation passed. Role: {db_user.role}"
+                }) + "\n\n"
+                await asyncio.sleep(0.5)
+
+                yield "data: " + json.dumps({
+                    "type": "log",
+                    "content": f"Workspace path loaded: {db_user.workspace_path}"
+                }) + "\n\n"
+                await asyncio.sleep(0.5)
+
+                yield "data: " + json.dumps({
+                    "type": "log",
+                    "content": "Starting agent processing."
+                }) + "\n\n"
+                await asyncio.sleep(0.5)
+
+                yield "data: " + json.dumps({
+                    "type": "log",
+                    "content": "Sending message to selected model backend."
+                }) + "\n\n"
+                await asyncio.sleep(0.5)
+
+                log_queue = asyncio.Queue()
+
+                async def emit(message: str):
+                    await log_queue.put({
+                        "type": "log",
+                        "content": message
+                    })
+
+                agent_task = asyncio.create_task(
+                    run_agent(req.message, trusted_user, req.backend, emit=emit)
+                )
+
+                while not agent_task.done() or not log_queue.empty():
+                    while not log_queue.empty():
+                        log_item = await log_queue.get()
+                        yield "data: " + json.dumps(log_item) + "\n\n"
+
+                    await asyncio.sleep(0.1)
+
+                reply = await agent_task
+                yield "data: " + json.dumps({
+                    "type": "log",
+                    "content": "Agent finished processing."
+                }) + "\n\n"
+                await asyncio.sleep(0.5)
+
+                yield "data: " + json.dumps({
+                    "type": "log",
+                    "content": "Preparing final response for frontend."
+                }) + "\n\n"
+                await asyncio.sleep(0.5)
+
+                yield "data: " + json.dumps({
+                    "type": "final",
+                    "content": reply
+                }) + "\n\n"
+
+            finally:
+                db.close()
+        #Chat Strem Error
+        except Exception as e:
+            yield "data: " + json.dumps({
+                "type": "error",
+                "content": str(e)
+            }) + "\n\n"
+
+    return StreamingResponse(generate_logs(), media_type="text/event-stream")

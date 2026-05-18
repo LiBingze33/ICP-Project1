@@ -76,27 +76,96 @@
         <pre>Please log in with GitHub before using the chat.</pre>
     {% endif %}
 
-    <script>
-        async function send_message() {
-            const message = document.getElementById("msg").value;
-            const backend = document.getElementById("backend").value;
+<script>
+    async function send_message() {
+        const message = document.getElementById("msg").value;
+        const backend = document.getElementById("backend").value;
+        const out = document.getElementById("out");
 
-            document.getElementById("out").textContent = "Waiting for reply.......";
+        out.textContent = "Thinking...\n";
 
-            const res = await fetch("/chat", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    message: message,
-                    backend: backend
-                })
-            });
-
-            const data = await res.json();
-            document.getElementById("out").textContent =
-                data.reply || data.error || "No response";
+        const res = await fetch("/chat-stream", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                message: message,
+                backend: backend
+            })
+        });
+        if (!res.ok || !res.body) {
+            out.textContent = "Request failed. Backend did not return a stream.";
+            return;
         }
-    </script>
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+
+        let buffer = "";
+        let logs = "";
+        let finalAnswer = "";
+
+        while (true) {
+            const { value, done } = await reader.read();
+
+            if (done) {
+                break;
+            }
+
+            buffer += decoder.decode(value, { stream: true });
+
+            const events = buffer.split("\n\n");
+            buffer = events.pop();
+
+            for (const event of events) {
+                if (!event.startsWith("data: ")) {
+                    continue;
+                }
+
+                const jsonText = event.replace("data: ", "");
+
+                try {
+                    const data = JSON.parse(jsonText);
+
+                    if (data.type === "log") {
+                        logs += "• " + data.content + "\n";
+
+                        out.textContent =
+                            "Backend activity:\n" +
+                            "--------------------\n" +
+                            logs +
+                            "\nFinal answer:\n" +
+                            "--------------------\n" +
+                            "Still generating...";
+                    }
+
+                    if (data.type === "final") {
+                        finalAnswer = data.content;
+
+                        out.textContent =
+                            "Backend activity:\n" +
+                            "--------------------\n" +
+                            logs +
+                            "\nFinal answer:\n" +
+                            "--------------------\n" +
+                            finalAnswer;
+                    }
+
+                    if (data.type === "error") {
+                        out.textContent =
+                            "Backend activity:\n" +
+                            "--------------------\n" +
+                            logs +
+                            "\nError:\n" +
+                            "--------------------\n" +
+                            data.content;
+                    }
+
+                } catch (err) {
+                    out.textContent += "\nFailed to parse stream event: " + err;
+                }
+            }
+        }
+    }
+</script>
 </body>
 
 </html>
