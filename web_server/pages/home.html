@@ -4,84 +4,207 @@
 <head>
     <meta charset="utf-8">
     <title>MCP Web Chat</title>
+
     <style>
+        * {
+            box-sizing: border-box;
+        }
+
         body {
-            max-width: 800px;
-            margin: 40px auto;
+            margin: 0;
+            min-height: 100vh;
             font-family: Arial, Helvetica, sans-serif;
+            background: linear-gradient(135deg, #f7efe5, #eef3f8);
+            color: #222;
+        }
+
+        .page {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }
+
+        .card {
+            background: #ffffff;
+            border-radius: 18px;
+            padding: 28px;
+            box-shadow: 0 12px 30px rgba(0, 0, 0, 0.08);
+            border: 1px solid rgba(0, 0, 0, 0.06);
+        }
+
+        h1 {
+            margin: 0 0 8px;
+            font-size: 32px;
+        }
+
+        .subtitle {
+            margin: 0 0 24px;
+            color: #666;
+            font-size: 15px;
+        }
+
+        .login {
+            margin-bottom: 22px;
+            padding: 14px 16px;
+            background: #f8f4ee;
+            border: 1px solid #eadccb;
+            border-radius: 12px;
+            color: #4a3a2a;
+        }
+
+        .login a {
+            color: #7a4b18;
+            font-weight: bold;
+            text-decoration: none;
+        }
+
+        .login a:hover {
+            text-decoration: underline;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+        }
+
+        select {
+            width: 220px;
+            padding: 10px 12px;
+            border-radius: 10px;
+            border: 1px solid #ccc;
+            background: white;
+            font-size: 14px;
+            margin-bottom: 16px;
         }
 
         textarea {
             width: 100%;
-            height: 200px;
+            height: 180px;
+            padding: 14px;
+            border-radius: 14px;
+            border: 1px solid #ccc;
+            resize: vertical;
+            font-size: 15px;
+            line-height: 1.5;
+            outline: none;
+        }
+
+        textarea:focus,
+        select:focus {
+            border-color: #c28a48;
+            box-shadow: 0 0 0 3px rgba(194, 138, 72, 0.18);
+        }
+
+        .actions {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            margin-top: 14px;
         }
 
         button {
             margin-top: 12px;
             padding: 10px 20px;
             background-color: bisque;
+            border: 1px solid #c8a46d;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: 0.2s ease;
         }
 
-        select {
-            margin-top: 12px;
-            padding: 8px;
+        /* When button is clickable */
+        button:hover:not(:disabled) {
+            background-color: #f4c27a;
+            transform: translateY(-1px);
         }
 
-        pre {
+        /* When button is being clicked */
+        button:active:not(:disabled) {
+            transform: translateY(0);
+            background-color: #e6ad5c;
+        }
+
+        /* When button is disabled */
+        button:disabled {
+            background-color: #d3d3d3;
+            color: #777;
+            border-color: #aaa;
+            cursor: not-allowed;
+            opacity: 0.7;
+            transform: none;
+        }
+
+        .output {
             white-space: pre-wrap;
-            background: #f5f5f5;
-            padding: 16px;
-            border-radius: 8px;
-            margin-top: 20px;
+            background: #111827;
+            color: #e5e7eb;
+            padding: 18px;
+            border-radius: 14px;
+            margin-top: 24px;
+            min-height: 180px;
+            font-size: 14px;
+            line-height: 1.5;
+            overflow-x: auto;
         }
 
-        .login {
-            margin-bottom: 20px;
-            padding: 12px;
-            background: #f5f5f5;
-            border-radius: 8px;
+
+        .danger-note {
+            margin-top: 14px;
+            padding: 12px 14px;
+            background: #fff3f3;
+            border: 1px solid #ffd0d0;
+            color: #8a1f1f;
+            border-radius: 12px;
+            font-size: 14px;
         }
     </style>
 </head>
 
 <body>
-    <h1>MCP Web Chat</h1>
+    <main class="page">
+        <section class="card">
+            <h1>MCP Web Chat</h1>
 
-    {% if user %}
-        <div class="login">
-            Logged in as: <strong>{{ user }}</strong>
-            <br>
-            <a href="/logout">Logout</a>
-        </div>
+            {% if user %}
+                <div class="login">
+                    Logged in as: <strong>{{ user }}</strong>
+                    <br>
+                    <a href="/logout">Logout</a>
+                </div>
 
-        <label for="backend"><strong>Model backend:</strong></label>
-        <br>
-        <select id="backend">
-            <option value="openrouter" selected>OpenRouter</option>
-            <option value="ollama">Local model</option>
-        </select>
+                <label for="backend"><strong>Model backend:</strong></label>
+                <select id="backend">
+                    <option value="openrouter" selected>OpenRouter</option>
+                    <option value="ollama">Local model</option>
+                </select>
 
-        <br><br>
+                <textarea id="msg" placeholder="Ask anything, external tools might be involved"></textarea>
 
-        <textarea id="msg" placeholder="Ask anything, external tools might be involved"></textarea>
-        <br>
-        <button onclick="send_message()">Send</button>
+                <div class="actions">
+                    <button id="sendBtn" onclick="send_message()">Send</button>
+                </div>
 
-        <pre id="out">Response will appear here...</pre>
-    {% else %}
-        <div class="login">
-            <a href="/login">Login with GitHub</a>
-        </div>
+                <pre id="out" class="output">Response will appear here...</pre>
+            {% else %}
+                <div class="login">
+                    <a href="/login">Login with GitHub</a>
+                </div>
 
-        <pre>Please log in with GitHub before using the chat.</pre>
-    {% endif %}
+                <div class="danger-note">
+                    Please log in with GitHub before using the chat.
+                </div>
+            {% endif %}
+        </section>
+    </main>
 
 <script>
-    async function send_message() {
+    async function send_message(approvedActions = []) {
         const message = document.getElementById("msg").value;
         const backend = document.getElementById("backend").value;
         const out = document.getElementById("out");
+        const sendBtn = document.getElementById("sendBtn");
 
+        sendBtn.disabled = true;
         out.textContent = "Thinking...\n";
 
         const res = await fetch("/chat-stream", {
@@ -89,13 +212,17 @@
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 message: message,
-                backend: backend
+                backend: backend,
+                approved_risky_actions: approvedActions
             })
         });
+
         if (!res.ok || !res.body) {
             out.textContent = "Request failed. Backend did not return a stream.";
+            sendBtn.disabled = false;
             return;
         }
+
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
 
@@ -137,6 +264,41 @@
                             "Still generating...";
                     }
 
+                    if (data.type === "consent_required") {
+                        logs += "• Consent required for risky action: " + data.tool_name + "\n";
+
+                        out.textContent =
+                            "Backend activity:\n" +
+                            "--------------------\n" +
+                            logs +
+                            "\nConsent required:\n" +
+                            "--------------------\n" +
+                            data.content;
+
+                        const filename = data.tool_args && data.tool_args.filename
+                            ? data.tool_args.filename
+                            : "unknown target";
+
+                        const approved = confirm(
+                            data.content +
+                            "\n\nTool: " + data.tool_name +
+                            "\nTarget: " + filename +
+                            "\n\nDo you want to continue?"
+                        );
+
+                        await reader.cancel();
+
+                        if (approved) {
+                            out.textContent += "\n\nUser approved. Running the request again...";
+                            await send_message([data.action_key]);
+                            return;
+                        } else {
+                            out.textContent += "\n\nAction cancelled by user. Tool was not executed.";
+                            sendBtn.disabled = false;
+                            return;
+                        }
+                    }
+
                     if (data.type === "final") {
                         finalAnswer = data.content;
 
@@ -157,6 +319,9 @@
                             "\nError:\n" +
                             "--------------------\n" +
                             data.content;
+
+                        sendBtn.disabled = false;
+                        return;
                     }
 
                 } catch (err) {
@@ -164,8 +329,11 @@
                 }
             }
         }
+
+        sendBtn.disabled = false;
     }
 </script>
+
 </body>
 
 </html>

@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from fastmcp import Client
 from openai import OpenAI
 from fastmcp.client.transports import StreamableHttpTransport
+from middleware.response_check import check_response
 load_dotenv()
 
 TOOL_POLICIES = {
@@ -32,10 +33,65 @@ TOOL_POLICIES = {
             "files_delete_file",
         },
     },
+    "admin": {
+    "prompt": "admin_admin_style",
+    "allowed_tools": {
+        "admin_list_users",
+    },
+},
 }
 
 
+RISKY_TOOL_RULES = {
+    "files_delete_file": {
+        "requires_consent": True,
+        "description": "This action will delete a file from your workspace.",
+    },
 
+    # You can add more risky tools later.
+    # Example:
+    # "files_create_file": {
+    #     "level": "medium",
+    #     "requires_consent": True,
+    #     "description": "This action will create or overwrite a file.",
+    # },
+}
+
+
+def build_action_key(tool_name: str, tool_args: dict) -> str:
+    """
+    Create a specific approval key for a tool action.
+
+    Example:
+    files_delete_file:test.txt
+    """
+    if tool_name in {
+        "files_delete_file",
+    }:
+        filename = tool_args.get("filename", "")
+        return f"{tool_name}:{filename}"
+
+    return tool_name
+
+
+def assess_tool_risk(tool_name: str, tool_args: dict) -> dict:
+    """
+    Check whether a tool requires user consent.
+    """
+    rule = RISKY_TOOL_RULES.get(tool_name)
+    #jf the policy is not in the risky-tool list
+    if not rule:
+        return {
+            "requires_consent": False,
+            "description": "No consent required.",
+            "action_key": build_action_key(tool_name, tool_args),
+        }
+
+    return {
+        "requires_consent": rule["requires_consent"],
+        "description": rule["description"],
+        "action_key": build_action_key(tool_name, tool_args),
+    }
 
 
 
@@ -65,13 +121,15 @@ def classify_context_with_ai(user_message: str, backend: str = "openrouter") -> 
             "role": "system",
             "content": (
                 "Classify the user's request into exactly one category: "
-                "files, weather, or general. "
+                "files, weather, admin or general. "
                 "Return only one word. "
                 "Use files if the user wants to list, read, create, write, delete, "
                 "open, show, or summarise local files, folders, documents, notes, "
                 "or workspace content. "
                 "Use weather if the user asks about weather, forecast, temperature, "
                 "rain, alerts, or location weather. "
+                "Use admin if the user asks about application users, database users, user roles, "
+                "user count, admin status, or system user management. "
                 "Use general if no tool is needed."
             ),
         },
@@ -90,7 +148,7 @@ def classify_context_with_ai(user_message: str, backend: str = "openrouter") -> 
 
     category = (result.choices[0].message.content or "").strip().lower()
 
-    if category not in {"files", "weather", "general"}:
+    if category not in {"files", "weather", "general", "admin"}:
         return "general"
 
     return category
@@ -121,23 +179,17 @@ def choose_context(user_message: str, backend: str = "openrouter") -> tuple[str,
     return policy["prompt"], policy["allowed_tools"]
 
 def filter_tools_by_user_role(allowed_tools: set[str], user: dict) -> set[str]:
-    """
-    Simple role-based authorization layer.
 
-    Default GitHub login creates a normal user.
-    Normal users should not be able to delete files.
-    Admins can use all tools in the selected context.
-    """
     role = user.get("role", "user")
+
+    admin_only_tools = {
+        "admin_list_users",
+    }
 
     if role == "admin":
         return allowed_tools
 
-    restricted_tools = {
-        "files_delete_file",
-    }
-
-    return allowed_tools - restricted_tools
+    return allowed_tools - admin_only_tools
 
 def call_llm(messages, available_tools, backend="openrouter", max_tokens=500):
     backend = backend.lower()
@@ -218,13 +270,15 @@ def create_internal_mcp_jwt(user: dict) -> str:
 async def emit_log(emit, message: str):
     if emit:
         await emit(message)
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.2)
 
-async def run_agent(user_message: str, user: dict, backend: str = "openrouter", emit=None) -> str:
+async def run_agent(user_message: str, user: dict, backend: str = "openrouter", emit=None, approved_risky_actions: list[str] | None = None,) -> str:
     """
     user comes from FastAPI session after GitHub OAuth login.
     """
     await emit_log(emit, "Agent started.")
+    if approved_risky_actions is None:
+        approved_risky_actions = []
 
     github_login = user.get("login", "unknown_user")
     role = user.get("role", "user")
@@ -317,7 +371,7 @@ async def run_agent(user_message: str, user: dict, backend: str = "openrouter", 
             messages=messages,
             available_tools=available_tools,
             backend=backend,
-            max_tokens=500,
+            max_tokens=1000,
         )
         await emit_log(emit, "First LLM response received.")
 
@@ -427,16 +481,49 @@ async def run_agent(user_message: str, user: dict, backend: str = "openrouter", 
                     tool_args["workspace_path"] = workspace_path
                     await emit_log(emit, f"Workspace path injected into tool arguments: /{Path(workspace_path).name}")
                 await emit_log(emit, "Pre-tool validation passed.")
+                #The tool request looks valid, but have not executed it yet
+                # Check whether this tool action is risky and needs user consent
+                risk = assess_tool_risk(tool_name, tool_args)
+                action_key = risk["action_key"]
+                #Do we need consent? or has the user already approved
+                if risk["requires_consent"] and action_key not in approved_risky_actions:
+                    await emit_log(emit, f"Consent required before running tool: {tool_name}")
+
+                    if emit:
+                        await emit({
+                            "type": "consent_required",
+                            "content": risk["description"],
+                            "tool_name": tool_name,
+                            "tool_args": {
+                                k: v for k, v in tool_args.items()
+                                if k != "workspace_path"
+                            },
+                            "action_key": action_key,
+                        })
+
+                    return "Action paused. User consent is required before this tool can run."
+
                 await emit_log(emit, f"Calling MCP tool: {tool_name}")
 
-                # Call MCP tool internally
+                # Call MCP tool internally only after validation and consent
                 tool_result = await mcp_client.call_tool(tool_name, tool_args)
 
                 await emit_log(emit, f"MCP tool finished: {tool_name}")
 
                 tool_text = extract_tool_text(tool_result)
-                await emit_log(emit, "Tool result extracted and prepared for model.")
+                await emit_log(emit, "Tool result extracted.")
 
+                # Post-tool response check
+                checked_text = check_response(
+                    tool_text,
+                    source=f"Tool output from {tool_name}"
+                )
+
+                if checked_text != tool_text:
+                    await emit_log(emit, f"Tool output blocked or modified by response check: {tool_name}")
+
+                tool_text = checked_text
+                await emit_log(emit, "Tool result checked and prepared for model.")
                 messages.append(
                     {
                         "role": "tool",
@@ -451,7 +538,7 @@ async def run_agent(user_message: str, user: dict, backend: str = "openrouter", 
                 messages=messages,
                 available_tools=available_tools,
                 backend=backend,
-                max_tokens=500,
+                max_tokens=1000,
             )
             await emit_log(emit, "Second LLM response received.")
 
@@ -461,5 +548,10 @@ async def run_agent(user_message: str, user: dict, backend: str = "openrouter", 
         else:
             await emit_log(emit, "No tool call requested by the model.")
 
+        final_response = "\n".join(part for part in final_parts if part).strip()
+
+        await emit_log(emit, "Running final response check.")
+        final_response = check_response(final_response, source="Final response")
+
         await emit_log(emit, "Final response generated.")
-        return "\n".join(part for part in final_parts if part).strip()
+        return final_response

@@ -54,6 +54,8 @@ Base.metadata.create_all(bind=engine)
 class ChatRequest(BaseModel):
     message: str
     backend: Literal["openrouter", "ollama"] = "openrouter"
+    #This is used after the user clicks "Yes" on the consent popup
+    approved_risky_actions: list[str] = []
 
 #Homepage
 @app.get("/")
@@ -102,8 +104,7 @@ async def auth_callback(request: Request):
     workspace_folder = f"github_{github_login}"
     full_workspace_path = BASE_WORKSPACE_DIR / workspace_folder
     full_workspace_path.mkdir(parents=True, exist_ok=True)
-    #does not show the root path
-    workspace_path=workspace_folder
+
     
     
     # Save or update user in local database
@@ -133,7 +134,7 @@ async def auth_callback(request: Request):
                 db.refresh(user)
 
             # Make sure the folder still exists
-            Path(user.workspace_path).mkdir(parents=True, exist_ok=True)
+            (BASE_WORKSPACE_DIR / user.workspace_path).mkdir(parents=True, exist_ok=True)
 
                 # Store logged-in user in session
         request.session["user"] = {
@@ -219,13 +220,13 @@ async def chat_stream(req: ChatRequest, request: Request):
                 "type": "log",
                 "content": "Request received from frontend."
             }) + "\n\n"
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
 
             yield "data: " + json.dumps({
                 "type": "log",
                 "content": f"Selected backend: {req.backend}"
             }) + "\n\n"
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
 
             # Check login session
             session_user = request.session.get("user")
@@ -241,7 +242,7 @@ async def chat_stream(req: ChatRequest, request: Request):
                 "type": "log",
                 "content": "Session check passed. User is logged in."
             }) + "\n\n"
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
 
             # Check whether the session contains GitHub login
             github_login = session_user.get("login")
@@ -258,7 +259,7 @@ async def chat_stream(req: ChatRequest, request: Request):
                 "type": "log",
                 "content": f"GitHub login found: {github_login}"
             }) + "\n\n"
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
 
             # Database validation
             db = SessionLocal()
@@ -268,7 +269,7 @@ async def chat_stream(req: ChatRequest, request: Request):
                     "type": "log",
                     "content": "Checking user in local database."
                 }) + "\n\n"
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.3)
 
                 db_user = db.query(User).filter(User.github_login == github_login).first()
 
@@ -293,36 +294,56 @@ async def chat_stream(req: ChatRequest, request: Request):
                     "type": "log",
                     "content": f"Database validation passed. Role: {db_user.role}"
                 }) + "\n\n"
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.3)
 
                 yield "data: " + json.dumps({
                     "type": "log",
                     "content": f"Workspace path loaded: {db_user.workspace_path}"
                 }) + "\n\n"
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.3)
 
                 yield "data: " + json.dumps({
                     "type": "log",
                     "content": "Starting agent processing."
                 }) + "\n\n"
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.3)
 
                 yield "data: " + json.dumps({
                     "type": "log",
                     "content": "Sending message to selected model backend."
                 }) + "\n\n"
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.3)
 
                 log_queue = asyncio.Queue()
 
-                async def emit(message: str):
-                    await log_queue.put({
-                        "type": "log",
-                        "content": message
-                    })
+                async def emit(message):
+                    # Normal text log
+                    if isinstance(message, str):
+                        await log_queue.put({
+                            "type": "log",
+                            "content": message
+                        })
+                        return
+
+                    # Special event, for example:
+                    # {"type": "consent_required", ...}
+                    #consent needs to send a special frontend event like
+                    #{
+                    #   "type": "consent_required",
+                    #   "content": "This action will delete a file."
+                    #}
+                    if isinstance(message, dict):
+                        await log_queue.put(message)
+                        return
 
                 agent_task = asyncio.create_task(
-                    run_agent(req.message, trusted_user, req.backend, emit=emit)
+                    run_agent(
+                        req.message, 
+                        trusted_user, 
+                        req.backend, 
+                        emit=emit,
+                        approved_risky_actions = req.approved_risky_actions,
+                          )
                 )
 
                 while not agent_task.done() or not log_queue.empty():
@@ -337,13 +358,13 @@ async def chat_stream(req: ChatRequest, request: Request):
                     "type": "log",
                     "content": "Agent finished processing."
                 }) + "\n\n"
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.3)
 
                 yield "data: " + json.dumps({
                     "type": "log",
                     "content": "Preparing final response for frontend."
                 }) + "\n\n"
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.3)
 
                 yield "data: " + json.dumps({
                     "type": "final",
