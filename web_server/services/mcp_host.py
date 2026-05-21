@@ -9,6 +9,7 @@ from fastmcp import Client
 from openai import OpenAI
 from fastmcp.client.transports import StreamableHttpTransport
 from middleware.response_check import check_response
+from middleware.pre_check import PreCheckMiddleware
 load_dotenv()
 
 TOOL_POLICIES = {
@@ -143,7 +144,7 @@ def classify_context_with_ai(user_message: str, backend: str = "openrouter") -> 
         messages=messages,
         available_tools=[],
         backend=backend,
-        max_tokens=10,
+        max_tokens=20,
     )
 
     category = (result.choices[0].message.content or "").strip().lower()
@@ -154,17 +155,38 @@ def classify_context_with_ai(user_message: str, backend: str = "openrouter") -> 
     return category
 
 def extract_tool_text(tool_result) -> str:
+    """
+    Convert an MCP tool result into plain text.
+
+    MCP tools may return results in different formats:
+    - a normal string
+    - an object with a .content field
+    - an object with a .text field
+    - a list of text blocks inside .content
+
+    This function makes sure the rest of the program always receives a string.
+    """
+    # If the tool already returned plain text, return it directly.
     if isinstance(tool_result, str):
         return tool_result
-
+    # Try to get the "content" field from the tool result.
+    # getattr is used so it will not crash if "content" does not exist.
     content = getattr(tool_result, "content", None)
+    # If the result has content, process it.
     if content is not None:
+        # If content is already a string, return it directly.
         if isinstance(content, str):
             return content
+        # If content is a list, extract text from each item.
+        # Some MCP results return content as a list of text blocks.
         if isinstance(content, list):
             return "\n".join(getattr(item, "text", str(item)) for item in content)
+        # If content exists but is not a string or list,
+        # convert it to a string as a fallback.
         return str(content)
 
+    # If there is no "content" field, try to get a "text" field.
+    # If that also does not exist, convert the whole result to a string.
     return getattr(tool_result, "text", str(tool_result))
 
 
@@ -279,8 +301,9 @@ async def run_agent(user_message: str, user: dict, backend: str = "openrouter", 
     await emit_log(emit, "Agent started.")
     if approved_risky_actions is None:
         approved_risky_actions = []
-
+    #try to get username, if not found, use "unknown_user" as default. 
     github_login = user.get("login", "unknown_user")
+    #try to get user role, if not found, use "user" as default.
     role = user.get("role", "user")
 
     await emit_log(emit, f"Authenticated user loaded: {github_login}")
@@ -291,7 +314,10 @@ async def run_agent(user_message: str, user: dict, backend: str = "openrouter", 
 
     await emit_log(emit, f"Selected MCP prompt: {prompt_name}")
     await emit_log(emit, f"Tools allowed by selected policy: {sorted(list(allowed_tools))}")
-
+    if prompt_name == "files_file_style":
+        await emit_log(emit, "Running file request sanitisation check.")
+        PreCheckMiddleware.reject_unsafe_text(user_message)
+        await emit_log(emit, "File request sanitisation passed.")
     await emit_log(emit, "Applying role-based tool filtering.")
     allowed_tools = filter_tools_by_user_role(allowed_tools, user)
 
@@ -459,12 +485,14 @@ async def run_agent(user_message: str, user: dict, backend: str = "openrouter", 
                     if not isinstance(filename, str) or not filename.strip():
                         await emit_log(emit, "Validation failed: invalid filename.")
                         raise ValueError("Invalid filename.")
+                    PreCheckMiddleware.reject_unsafe_text(filename)
 
                 if tool_name == "files_create_file":
                     content = tool_args.get("content", "")
                     if not isinstance(content, str):
                         await emit_log(emit, "Validation failed: invalid file content.")
                         raise ValueError("Invalid file content.")
+                    PreCheckMiddleware.reject_unsafe_text(content)
 
                 if tool_name in {
                     "files_list_files",
