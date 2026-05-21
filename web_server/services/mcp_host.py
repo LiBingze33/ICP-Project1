@@ -67,6 +67,7 @@ def choose_context(user_message: str) -> tuple[str, set[str]]:
     if any(keyword in text for keyword in file_keywords) or ".txt" in text or ".md" in text:
         return "files_file_style", {
             "files_list_files",
+            "files_list_user_files",
             "files_read_file",
             "files_create_file",
             "files_delete_file",
@@ -83,7 +84,11 @@ def choose_context(user_message: str) -> tuple[str, set[str]]:
 
 def is_file_action_request(user_message: str) -> bool:
     text = user_message.lower()
-    return any(keyword in text for keyword in ("create", "read", "delete", "list")) or ".txt" in text or ".md" in text
+    return (
+        any(keyword in text for keyword in ("create", "read", "delete", "list", "show", "see", "file"))
+        or ".txt" in text
+        or ".md" in text
+    )
 
 
 def has_explicit_delete_confirmation(user_message: str) -> bool:
@@ -196,13 +201,19 @@ async def run_agent(user_message: str) -> str:
                         raise ValueError("Invalid coordinates.")
 
                 if tool_name in {
+                    "files_list_user_files",
                     "files_read_file",
                     "files_create_file",
                     "files_delete_file",
                 }:
-                    filename = tool_args.get("filename", "")
-                    if not isinstance(filename, str) or not filename.strip():
-                        raise ValueError("Invalid filename.")
+                    if tool_name == "files_list_user_files":
+                        username = tool_args.get("username", "")
+                        if not isinstance(username, str) or not username.strip():
+                            raise ValueError("Invalid username.")
+                    else:
+                        filename = tool_args.get("filename", "")
+                        if not isinstance(filename, str) or not filename.strip():
+                            raise ValueError("Invalid filename.")
 
                 if tool_name == "files_create_file":
                     content = tool_args.get("content", "")

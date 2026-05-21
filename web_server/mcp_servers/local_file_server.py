@@ -3,7 +3,7 @@ from pathlib import Path
 from fastmcp import FastMCP
 
 from database.db import Base, SessionLocal, engine
-from database.model import OwnedFile
+from database.model import OwnedFile, User
 from middleware import FileMiddleware
 from middleware.auth import get_current_local_user_identity
 
@@ -44,6 +44,39 @@ def get_owned_file_record(db, user_id: int, logical_name: str) -> OwnedFile | No
     )
 
 
+def get_user_by_login(db, github_login: str) -> User | None:
+    return (
+        db.query(User)
+        .filter(User.github_login == github_login)
+        .first()
+    )
+
+
+def list_owned_filenames_for_user(db, user_id: int) -> str:
+    records = (
+        db.query(OwnedFile)
+        .filter(OwnedFile.owner_user_id == user_id)
+        .order_by(OwnedFile.logical_name.asc())
+        .all()
+    )
+
+    files: list[str] = []
+    stale_records: list[OwnedFile] = []
+    for record in records:
+        storage_path = owned_storage_path(user_id, record.logical_name)
+        if storage_path.is_file():
+            files.append(record.logical_name)
+        else:
+            stale_records.append(record)
+
+    if stale_records:
+        for record in stale_records:
+            db.delete(record)
+        db.commit()
+
+    return "No files found." if not files else "\n".join(files)
+
+
 @file_mcp.prompt()
 async def file_style() -> str:
     return (
@@ -59,28 +92,29 @@ async def list_files() -> str:
     user = get_current_local_user_identity()
     db = SessionLocal()
     try:
-        records = (
-            db.query(OwnedFile)
-            .filter(OwnedFile.owner_user_id == user["user_id"])
-            .order_by(OwnedFile.logical_name.asc())
-            .all()
-        )
+        return list_owned_filenames_for_user(db, int(user["user_id"]))
+    finally:
+        db.close()
 
-        files: list[str] = []
-        stale_records: list[OwnedFile] = []
-        for record in records:
-            storage_path = owned_storage_path(user["user_id"], record.logical_name)
-            if storage_path.is_file():
-                files.append(record.logical_name)
-            else:
-                stale_records.append(record)
 
-        if stale_records:
-            for record in stale_records:
-                db.delete(record)
-            db.commit()
+@file_mcp.tool()
+async def list_user_files(username: str) -> str:
+    """List files for a username only when it matches the logged-in user."""
+    requested_username = username.strip()
+    if not requested_username:
+        return "A username is required."
 
-        return "No files found." if not files else "\n".join(files)
+    current_user = get_current_local_user_identity()
+    db = SessionLocal()
+    try:
+        requested_user = get_user_by_login(db, requested_username)
+        if requested_user is None:
+            return f"User '{requested_username}' does not exist."
+
+        if requested_user.user_id != current_user["user_id"]:
+            return "You can only view your own files."
+
+        return list_owned_filenames_for_user(db, requested_user.user_id)
     finally:
         db.close()
 

@@ -82,6 +82,16 @@ class FileOwnershipTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("alice version", alice_read)
         self.assertEqual("bob version", bob_read)
 
+    async def test_list_user_files_denies_cross_user_access(self) -> None:
+        with self._patch_file_server(self._identity(1, "alice")):
+            created = await local_file_server.create_file("alice.txt", "alice secret")
+            own_list = await local_file_server.list_user_files("alice")
+            cross_user_list = await local_file_server.list_user_files("bob")
+
+        self.assertIn("created successfully", created)
+        self.assertIn("alice.txt", own_list)
+        self.assertEqual("You can only view your own files.", cross_user_list)
+
 
 if __name__ == "__main__":
     unittest.main()
