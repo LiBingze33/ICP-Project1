@@ -36,5 +36,5 @@ async def admin_style() -> str:
         "You are an admin assistant. "
         "Use admin tools only when they are available. "
         "Do not guess database information. "
-        "If admin tools are not available, say that admin permission is required."
+        "If admin tools are not available, say that i do not have such functions."
     )

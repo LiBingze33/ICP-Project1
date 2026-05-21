@@ -73,12 +73,23 @@ async def home(req: Request):
         {"user": username},
     )
 
-
+#this /logout only logged the user out of the FastAPI app, not out of Github
+# @app.get("/login")
+# async def login(request: Request):
+#     redirect_uri = "http://127.0.0.1:8000/auth/callback"
+#     #Authlib builds the Github Login URL
+#     return await oauth.github.authorize_redirect(request, redirect_uri)
 @app.get("/login")
 async def login(request: Request):
-    redirect_uri = "http://127.0.0.1:8000/auth/callback"
-    #Authlib builds the Github Login URL
-    return await oauth.github.authorize_redirect(request, redirect_uri)
+    #Build the URL for the route handled by the function called auth_callback
+    redirect_uri = request.url_for("auth_callback")
+
+    return await oauth.github.authorize_redirect(
+        request,
+        redirect_uri,
+        #to force Github to ask again
+        prompt="select_account"
+    )
 
 
 @app.get("/auth/callback")
@@ -150,12 +161,18 @@ async def auth_callback(request: Request):
         db.close()
     #go back to home page
     return RedirectResponse(url="/")
-
+# @app.get("/logout")
+# async def logout(request: Request):
+#     request.session.clear()
+#     return RedirectResponse(url="/")
 @app.get("/logout")
 async def logout(request: Request):
     request.session.clear()
-    return RedirectResponse(url="/")
 
+    response = RedirectResponse(url="/", status_code=302)
+    response.delete_cookie("session")
+
+    return response
 
 # @app.post("/chat")
 # async def chat(req: ChatRequest, request: Request):
