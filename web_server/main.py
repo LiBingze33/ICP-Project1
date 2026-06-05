@@ -3,11 +3,12 @@ import json
 import asyncio
 from authlib.integrations.starlette_client import OAuth
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Form, File, UploadFile
 from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
+from middleware.pre_check import PreCheckMiddleware
 from typing import Literal
 from database.model import User
 from database.db import engine, Base, SessionLocal
@@ -51,11 +52,11 @@ htmls = Jinja2Templates(directory="pages")
 Base.metadata.create_all(bind=engine)
 
 
-class ChatRequest(BaseModel):
-    message: str
-    backend: Literal["openrouter", "ollama"] = "openrouter"
-    #This is used after the user clicks "Yes" on the consent popup
-    approved_risky_actions: list[str] = []
+# class ChatRequest(BaseModel):
+#     message: str
+#     backend: Literal["openrouter", "ollama"] = "openrouter"
+#     #This is used after the user clicks "Yes" on the consent popup
+#     approved_risky_actions: list[str] = []
 
 #Homepage
 @app.get("/")
@@ -174,65 +175,42 @@ async def logout(request: Request):
 
     return response
 
-# @app.post("/chat")
-# async def chat(req: ChatRequest, request: Request):
-#     try:
-#         #check if the user is logged in and have a session
-#         session_user = request.session.get("user")
-
-#         if not session_user:
-#             return {"error": "Please log in with GitHub before using the tools."}
-#         #do not solely trust the session
-#         # reply = await run_agent(req.message, user, req.backend)
-
-#         #Check wether the session contains a valid identity value
-#         github_login = session_user.get("login")
-#         if not github_login:
-#             #clear the session
-#             request.session.clear()
-#             return{"error":"Invalid session. Please login again"}
-
-#         #Database user validation
-#         #Check whether the logged-in GitHub user still exist
-#         db = SessionLocal()
-#         try:
-#             db_user = db.query(User).filter(User.github_login == github_login).first()
-
-#             if not db_user:
-#                 request.session.clear()
-#                 return {"error": "User no longer exists. Please log in again."}
-
-
-#             #Create a user text from the database
-#             #Avoids simply trusting role/worksapce from the session
-#             trusted_user = {
-#             "user_id": db_user.user_id,
-#             "login": db_user.github_login,
-#             "role": db_user.role,
-#             #the file tool still need full path internally
-#             "workspace_path": str((BASE_WORKSPACE_DIR / db_user.workspace_path).resolve()),
-#             }
-#             reply = await run_agent(req.message, trusted_user, req.backend)
-
-#             return {
-#                 "reply": reply,
-#                 "backend_used": req.backend,
-#             }
-#         finally:
-#             db.close()
-#     except Exception as e:
-#         return {"error": str(e)}
     
 @app.post("/chat-stream")
-async def chat_stream(req: ChatRequest, request: Request):
+# instead of using JSON body, we use FormData because it is easier to send files and multiple fields from the frontend
+async def chat_stream(
+    request: Request,
+    message: str = Form(...),
+    backend: Literal["openrouter", "ollama"] = Form("openrouter"),
+    approved_risky_actions: str = Form("[]"),
+    uploaded_file: UploadFile | None = File(None),
+):
+    # approved_risky_actions is sent from the frontend as a JSON string,
+    # so we convert it back into a Python list.
+    try:
+        approved_actions_list = json.loads(approved_risky_actions)
+        if not isinstance(approved_actions_list, list):
+            approved_actions_list = []
+    except json.JSONDecodeError:
+        approved_actions_list = []
+
+    # These variables store the uploaded file before the streaming response starts.
+    uploaded_file_bytes = None
+    uploaded_file_mime_type = None
+    uploaded_file_name = None
+
+    if uploaded_file is not None:
+        uploaded_file_bytes = await uploaded_file.read()
+        uploaded_file_mime_type = uploaded_file.content_type
+        uploaded_file_name = uploaded_file.filename
 
     async def generate_logs():
         try:
-            #send the message to the frontend, but do not finish the whole response
-            #json.dumps convert python dictonary into Json Text
-            #data is for SSE streaming
-            #https://fastapi.tiangolo.com/advanced/stream-data/
-            
+            # send the message to the frontend, but do not finish the whole response
+            # json.dumps convert python dictionary into JSON text
+            # data is for SSE streaming
+            # https://fastapi.tiangolo.com/advanced/stream-data/
+
             yield "data: " + json.dumps({
                 "type": "log",
                 "content": "Request received from frontend."
@@ -241,7 +219,7 @@ async def chat_stream(req: ChatRequest, request: Request):
 
             yield "data: " + json.dumps({
                 "type": "log",
-                "content": f"Selected backend: {req.backend}"
+                "content": f"Selected backend: {backend}"
             }) + "\n\n"
             await asyncio.sleep(0.3)
 
@@ -297,14 +275,14 @@ async def chat_stream(req: ChatRequest, request: Request):
                         "content": "User no longer exists. Please log in again."
                     }) + "\n\n"
                     return
-            #Create a user text from the database
-            #Avoids simply trusting role/worksapce from the session
+
+                # Create a trusted user context from the database
+                # Avoids simply trusting role/workspace from the session
                 trusted_user = {
                     "user_id": db_user.user_id,
                     "login": db_user.github_login,
                     "role": db_user.role,
                     "workspace_path": str((BASE_WORKSPACE_DIR / db_user.workspace_path).resolve()),
-
                 }
 
                 yield "data: " + json.dumps({
@@ -318,6 +296,83 @@ async def chat_stream(req: ChatRequest, request: Request):
                     "content": f"Workspace path loaded: {db_user.workspace_path}"
                 }) + "\n\n"
                 await asyncio.sleep(0.3)
+
+                uploaded_file_saved_name = None
+
+                # These variables decide whether the uploaded file should also be passed to the model.
+                image_bytes_for_model = None
+                image_mime_type_for_model = None
+                uploaded_text_for_model = ""
+
+                # If the user uploaded a file, save it into the user's private workspace.
+                if uploaded_file_bytes is not None and uploaded_file_name:
+                    # Path(...).name removes any folder path from the uploaded filename.
+                    # This helps prevent path traversal through uploaded filenames.
+                    safe_name = Path(uploaded_file_name).name
+
+                    allowed_suffixes = {
+                        ".txt",
+                        ".md",
+                        ".png",
+                        ".jpg",
+                        ".jpeg",
+                        ".pdf",
+                    }
+
+                    suffix = Path(safe_name).suffix.lower()
+
+                    # Only allow selected file types for the demo.
+                    if suffix not in allowed_suffixes:
+                        yield "data: " + json.dumps({
+                            "type": "error",
+                            "content": "File type is not allowed."
+                        }) + "\n\n"
+                        return
+                    # Check uploaded filename before saving
+                    PreCheckMiddleware.reject_unsafe_text(safe_name)
+
+                    # If the uploaded file is text-like, check the content before saving
+                    uploaded_text_for_model = ""
+
+                    if suffix in {".txt", ".md"}:
+                        try:
+                            uploaded_text_for_model = uploaded_file_bytes.decode("utf-8")
+                        except UnicodeDecodeError:
+                            yield "data: " + json.dumps({
+                                "type": "error",
+                                "content": "Uploaded text file could not be decoded as UTF-8."
+                            }) + "\n\n"
+                            return
+
+                        # If this fails, the file will not be saved
+                        PreCheckMiddleware.reject_unsafe_text(uploaded_text_for_model)
+
+                    workspace_dir = Path(trusted_user["workspace_path"]).resolve()
+                    save_path = (workspace_dir / safe_name).resolve()
+
+                    # Make sure the final save path is still inside the user's workspace.
+                    if workspace_dir not in save_path.parents and save_path != workspace_dir:
+                        yield "data: " + json.dumps({
+                            "type": "error",
+                            "content": "Invalid upload path."
+                        }) + "\n\n"
+                        return
+
+                    # Save the uploaded file into the user workspace.
+                    
+                    save_path.write_bytes(uploaded_file_bytes)
+                    uploaded_file_saved_name = safe_name
+
+                    yield "data: " + json.dumps({
+                        "type": "log",
+                        "content": f"Uploaded file saved to workspace: {safe_name}"
+                    }) + "\n\n"
+                    await asyncio.sleep(0.3)
+
+                    # If the uploaded file is an image, pass it to the vision-capable model.
+                    if uploaded_file_mime_type and uploaded_file_mime_type.startswith("image/"):
+                        image_bytes_for_model = uploaded_file_bytes
+                        image_mime_type_for_model = uploaded_file_mime_type
 
                 yield "data: " + json.dumps({
                     "type": "log",
@@ -344,23 +399,37 @@ async def chat_stream(req: ChatRequest, request: Request):
 
                     # Special event, for example:
                     # {"type": "consent_required", ...}
-                    #consent needs to send a special frontend event like
-                    #{
+                    # consent needs to send a special frontend event like
+                    # {
                     #   "type": "consent_required",
                     #   "content": "This action will delete a file."
-                    #}
+                    # }
                     if isinstance(message, dict):
                         await log_queue.put(message)
                         return
 
+                # The model receives the normal user message by default.
+                message_for_model = message
+
+                # If a text file was uploaded, attach the file content to the model message.
+                if uploaded_text_for_model:
+                    message_for_model = (
+                        f"{message}\n\n"
+                        f"Uploaded file name: {uploaded_file_saved_name}\n"
+                        f"Uploaded file content:\n"
+                        f"{uploaded_text_for_model}"
+                    )
+
                 agent_task = asyncio.create_task(
                     run_agent(
-                        req.message, 
-                        trusted_user, 
-                        req.backend, 
+                        message_for_model,
+                        trusted_user,
+                        backend,
                         emit=emit,
-                        approved_risky_actions = req.approved_risky_actions,
-                          )
+                        approved_risky_actions=approved_actions_list,
+                        image_bytes=image_bytes_for_model,
+                        image_mime_type=image_mime_type_for_model,
+                    )
                 )
 
                 while not agent_task.done() or not log_queue.empty():
@@ -371,6 +440,7 @@ async def chat_stream(req: ChatRequest, request: Request):
                     await asyncio.sleep(0.1)
 
                 reply = await agent_task
+
                 yield "data: " + json.dumps({
                     "type": "log",
                     "content": "Agent finished processing."
@@ -390,7 +460,8 @@ async def chat_stream(req: ChatRequest, request: Request):
 
             finally:
                 db.close()
-        #Chat Strem Error
+
+        # Chat Stream Error
         except Exception as e:
             yield "data: " + json.dumps({
                 "type": "error",

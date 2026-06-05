@@ -10,6 +10,7 @@ from openai import OpenAI
 from fastmcp.client.transports import StreamableHttpTransport
 from middleware.response_check import check_response
 from middleware.pre_check import PreCheckMiddleware
+import base64
 load_dotenv()
 
 TOOL_POLICIES = {
@@ -58,6 +59,13 @@ RISKY_TOOL_RULES = {
     # },
 }
 
+def image_to_data_url(image_bytes: bytes, mime_type: str) -> str:
+    """
+    Convert uploaded image bytes into a base64 data URL
+    that can be sent to a vision-capable model.
+    """
+    encoded_image = base64.b64encode(image_bytes).decode("utf-8")
+    return f"data:{mime_type};base64,{encoded_image}"
 
 def build_action_key(tool_name: str, tool_args: dict) -> str:
     """
@@ -294,7 +302,15 @@ async def emit_log(emit, message: str):
         await emit(message)
         await asyncio.sleep(0.2)
 
-async def run_agent(user_message: str, user: dict, backend: str = "openrouter", emit=None, approved_risky_actions: list[str] | None = None,) -> str:
+async def run_agent(
+    user_message: str,
+    user: dict,
+    backend: str = "openrouter",
+    emit=None,
+    approved_risky_actions: list[str] | None = None,
+    image_bytes: bytes | None = None,
+    image_mime_type: str | None = None,
+) -> str:
     """
     user comes from FastAPI session after GitHub OAuth login.
     """
@@ -355,16 +371,42 @@ async def run_agent(user_message: str, user: dict, backend: str = "openrouter", 
             if text:
                 messages.append({"role": m.role, "content": text})
 
-        messages.append(
-            {
-                "role": "user",
-                "content": (
-                    f"Authenticated GitHub user: {github_login}\n"
-                    f"User role: {role}\n\n"
-                    f"User request: {user_message}"
-                ),
-            }
+        user_text = (
+            f"Authenticated GitHub user: {github_login}\n"
+            f"User role: {role}\n\n"
+            f"User request: {user_message}"
         )
+        # If the user uploaded an image, convert it to a data URL and include it in the message content.
+        # Otherwise, if it is a normal file upload or no upload, just send the text content as before.
+        if image_bytes is not None and image_mime_type is not None:
+            await emit_log(emit, "Image received. Adding image to model message.")
+
+            image_data_url = image_to_data_url(image_bytes, image_mime_type)
+
+            messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": user_text,
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image_data_url,
+                            },
+                        },
+                    ],
+                }
+            )
+        else:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": user_text,
+                }
+            )
 
         await emit_log(emit, "Messages prepared.")
 
