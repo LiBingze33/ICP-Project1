@@ -1,213 +1,395 @@
 # Secure AI MCP Web Server
 
-This project is a prototype web application for exploring the secure use of AI models with external APIs and Model Context Protocol (MCP) servers. The project focuses on layered security controls such as authentication, authorization, controlled tool access, and safer interaction with local or remote resources.
+This project is a security-focused prototype for exploring how an AI web
+application can safely use external tools, online APIs, and Model Context
+Protocol (MCP) servers. The system is designed to keep the language model useful
+while placing security checks around tool selection, tool arguments, uploaded
+content, tool output, and final model responses.
 
-The system includes:
+The prototype demonstrates layered controls for:
 
-- a web interface for user interaction
-- a main MCP controller
-- multiple MCP servers for different tasks
-- a database layer for local user and role handling
-- middleware for authentication and authorization checks
+- authentication and role-aware tool access
+- MCP tool allowlisting
+- private user workspaces
+- pre-call validation before tools run
+- post-call output scanning after tools or APIs return data
+- audit logging for tool execution decisions
+- uploaded file and image summarisation with security checks
 
 ## Project Purpose
 
-This project is security-first rather than product-first. Its purpose is to explore how an AI-enabled system can safely interact with APIs, MCP servers, and tools without allowing unsafe actions, prompt bypass, privilege abuse, or unauthorized access.
+The project is security-first rather than product-first. It supports a capstone
+report by demonstrating how LLM-powered applications can interact with local
+files, online APIs, and MCP tools without giving the model unrestricted access to
+system resources.
 
-The prototype supports the broader project goal of demonstrating a secure architecture for AI systems, where the main deliverable is a report and the software acts as a supporting proof of concept.
+The main security idea is that every useful action passes through controlled
+layers:
 
-## Features
+```text
+User request
+-> FastAPI web app
+-> authentication and database user lookup
+-> MCP host policy selection
+-> tool allowlist and argument validation
+-> MCP tool or API call
+-> post-call response check
+-> audit log
+-> final response check
+-> browser response
+```
 
-- Web-based chat interface
-- MCP-based tool integration
-- Local database support with SQLAlchemy
-- Authentication and authorization middleware
-- OAuth token caching
-- Support for multiple MCP servers such as:
-  - weather server
-  - local file server
+## Current Features
+
+### Web App and Authentication
+
+- FastAPI web chat interface
+- GitHub OAuth login
+- Local user records stored with SQLAlchemy
+- Per-user private workspace folders
+- Trusted user context loaded from the database, not directly from the session
+
+### MCP Tool Integration
+
+- Parent MCP server mounted at `http://127.0.0.1:9000/mcp`
+- Weather MCP tools for online weather API demonstrations
+- Local file MCP tools for listing, reading, creating, and deleting files
+- Admin MCP tool example for role-based access
+- Security demo MCP tools for safe post-call testing
+- Tool allowlisting in `services/mcp_host.py`
+
+### Pre-Call Security
+
+Pre-call checks happen before a tool is executed or before uploaded text is sent
+to the model.
+
+Controls include:
+
+- filename validation
+- path traversal blocking
+- workspace restriction
+- sensitive filename blocking, such as `.env` and private key files
+- XSS input detection
+- SQL injection input detection
+- delete confirmation for risky file operations
+- file upload extension allowlisting
+
+### Post-Call Security
+
+Post-call checks happen after a tool, API, uploaded-content extraction, or model
+response has produced output.
+
+The response checker can:
+
+- block secret-like content, API keys, bearer tokens, JWTs, and private keys
+- block prompt injection text
+- block suspicious API status output, such as `403`, `429`, or `500`
+- block local Desktop information leakage
+- redact local machine paths
+- block XSS-like content in tool output or final model summaries
+
+Post-call checking is implemented in:
+
+```text
+web_server/middleware/response_check.py
+```
+
+MCP tool calls are wrapped and checked in:
+
+```text
+web_server/services/mcp_host.py
+```
+
+### Canonicalisation-Based XSS Detection
+
+The XSS detector does not only match one hard-coded payload. It first
+canonicalises output by:
+
+- decoding URL encoding, such as `%0a` and `%09`
+- decoding HTML entities, such as `&#x0A;`
+- normalising whitespace
+- compacting text by removing separators and punctuation
+- checking for dangerous structure
+
+This helps detect variants such as:
+
+```text
+j%0aavas%09cript
+java&#x0A;script
+j a v a s c r i p t
+<img src=x onerror=alert(1)>
+```
+
+The detector looks for combinations such as:
+
+- HTML attributes like `href`, `src`, `action`, or `formaction`
+- dangerous schemes like `javascript`, `vbscript`, or `data:text/html`
+- execution markers like `alert`, `confirm`, `prompt`, `eval`, or `fetch`
+- event handlers like `onerror`, `onclick`, or `onload`
+
+### Uploaded File and Image Summarisation
+
+The web app supports uploaded content for summarisation or description:
+
+- `.txt`
+- `.md`
+- `.pdf`
+- `.png`
+- `.jpg`
+- `.jpeg`
+
+Text and Markdown files are decoded as UTF-8.
+
+PDF files are extracted with `pypdf` or `PyPDF2` if available. Extracted PDF text
+is scanned before it is sent to the model.
+
+Images are sent to a vision-capable model for description. The final image
+description is scanned by the post-call checker before it is shown to the user.
+
+Important limitation: image text is currently checked after the model describes
+the image. A stronger future layer would add OCR before the image is sent to the
+model.
+
+### Security Demo MCP Tools
+
+The demo MCP server provides safe test tools that simulate suspicious API
+responses without reading real secrets or real Desktop files.
+
+Demo tools include:
+
+- `demo_safe_health_check`
+- `demo_safe_public_info`
+- `demo_safe_echo`
+- `demo_fake_secret_api`
+- `demo_fake_desktop_info_api`
+- `demo_fake_error_status_api`
+
+These tools are useful for showing post-call blocking and audit logging in a
+controlled way.
+
+### Post-Call Audit Logging
+
+Tool execution decisions are logged to:
+
+```text
+web_server/security/post_call_audit.log
+```
+
+Audit records include:
+
+- timestamp
+- tool name
+- user identity
+- role
+- status
+- duration
+- output size
+- decision: `allowed`, `modified`, `blocked`, or `error`
+- block reason
+
+Sensitive audit fields such as tokens, secrets, content, and workspace paths are
+redacted before writing the log.
 
 ## Requirements
 
 - Python 3.10 or above
 - pip
 - virtual environment support
-- OpenRouter API key configured locally
-- OAuth credentials if OAuth-based login is enabled
+- OpenRouter API key
+- GitHub OAuth credentials
+- `pypdf` for PDF summarisation
 
 ## Installation
 
-Create and activate the virtual environment:
+From the `web_server` directory:
 
 ```bash
 python3 -m venv venv
 source venv/bin/activate
-```
-
-Install dependencies:
-
-```bash
 make install
 ```
 
-## API Key and Local Configuration
+Create or update `.env`:
 
-The API key is stored locally in the development environment rather than hardcoded into the project files.
-
-For example, it can be loaded from your local shell configuration:
-
-```bash
-source ~/.zshrc
+```env
+GITHUB_CLIENT_ID=your_github_client_id
+GITHUB_CLIENT_SECRET=your_github_client_secret
+OPENROUTER_API_KEY=your_openrouter_api_key
+SESSION_SECRET_KEY=your_session_secret
+INTERNAL_JWT_SECRET=your_internal_jwt_secret
 ```
-
-If needed, other local credentials such as OAuth client details should also be stored securely in the local environment and not committed to GitHub.
-
-## Project Structure
-
-```text
-web_server/
-├── database/
-│   ├── db.py
-│   └── model.py
-├── demo_docs/
-├── mcp_servers/
-│   ├── demo_docs/
-│   ├── secrets/
-│   ├── local_file_server.py
-│   └── weather_http_server.py
-├── middleware/
-│   ├── __init__.py
-│   └── auth.py
-├── oauth_tokens/
-│   ├── cache.db
-│   ├── cache.db-shm
-│   └── cache.db-wal
-├── pages/
-│   └── home.html
-├── services/
-│   └── mcp_host.py
-├── venv/
-├── database.db
-├── main.py
-├── main_mcp.py
-├── Makefile
-├── .gitignore
-└── README.md
-```
-
-## Main Components
-
-### `main.py`
-Starts the FastAPI web application and serves the main interface.
-
-### `main_mcp.py`
-Runs the parent MCP process that coordinates MCP-related functionality.
-
-### `mcp_servers/`
-Contains the individual MCP servers.
-
-- `weather_http_server.py` handles weather-related MCP requests
-- `local_file_server.py` handles local file access for demonstration purposes
-
-### `database/`
-Contains the database setup and models.
-
-- `db.py` configures the SQLAlchemy engine and session
-- `model.py` defines the database tables
-
-### `middleware/`
-Contains authentication and authorization logic.
-
-### `services/mcp_host.py`
-Handles communication between the web application and MCP services.
-
-### `pages/home.html`
-Frontend HTML page for the web interface.
 
 ## How to Run
 
 Start the MCP service:
 
 ```bash
+cd "/mnt/c/Users/tuetm/MCP - ICT Project/ICP-Project1/web_server"
+source venv/bin/activate
 make mcp
 ```
 
-In a separate terminal, start the web server:
+In a second terminal, start the web app:
 
 ```bash
+cd "/mnt/c/Users/tuetm/MCP - ICT Project/ICP-Project1/web_server"
+source venv/bin/activate
 make web
 ```
 
-Then open the application in your browser:
+Open:
 
 ```text
 http://127.0.0.1:8000
 ```
 
-## Makefile Commands
+## Example Web App Test Prompts
 
-### Install dependencies
+### File Tools
 
-```bash
-make install
+```text
+Create a file named notes.txt with content hello world
 ```
 
-### Run MCP service
-
-```bash
-make mcp
+```text
+Read the file notes.txt
 ```
 
-### Run web server
-
-```bash
-make web
+```text
+Read the file ../../secret.txt
 ```
 
-### Show startup instructions
+Expected: blocked for path traversal.
 
-```bash
-make all
+```text
+Create a file named xss.txt with content <script>alert(1)</script>
 ```
 
-## Current Makefile
+Expected: blocked before file creation.
 
-```makefile
-VENV = venv
-PYTHON = $(VENV)/bin/python3
-PIP = $(VENV)/bin/pip
-UVICORN = $(VENV)/bin/uvicorn
+### Uploaded File Summarisation
 
-.PHONY: install mcp web all
+Upload a normal `.txt` file and ask:
 
-install:
-	python3 -m venv $(VENV)
-	$(PIP) install fastapi uvicorn jinja2 pydantic python-dotenv openai fastmcp httpx sqlalchemy cryptography "py-key-value-aio[disk]" diskcache
+```text
+Summarise this uploaded file
+```
 
-mcp:
-	$(PYTHON) main_mcp.py
+Expected: allowed and summarised.
 
-web:
-	$(UVICORN) main:app --reload --port 8000
+Upload a `.txt` file containing:
 
-all:
-	@echo "Run these in separate terminals:"
-	@echo "make mcp"
-	@echo "make web"
+```text
+OPENROUTER_API_KEY=sk-test-secret
+```
+
+Then ask:
+
+```text
+Summarise this uploaded file
+```
+
+Expected: blocked before summarisation.
+
+Upload a PDF and ask:
+
+```text
+Summarise this uploaded PDF
+```
+
+Expected: extracted, scanned, and summarised if safe.
+
+Upload an image and ask:
+
+```text
+Describe this uploaded image
+```
+
+Expected: described if the final model output passes the post-call checker.
+
+### Post-Call Demo API Tools
+
+```text
+Run the security demo safe health check
+```
+
+Expected: allowed.
+
+```text
+Call the fake secret API for a post-call demo
+```
+
+Expected: blocked by post-call secret detection.
+
+```text
+Call the fake desktop info API for a post-call demo
+```
+
+Expected: blocked by post-call local data leakage detection.
+
+```text
+Call the fake error status API for a post-call demo
+```
+
+Expected: blocked by suspicious API status detection.
+
+## Running Tests
+
+From `web_server`:
+
+```bash
+source venv/bin/activate
+python3 -B -m unittest tests.test_postcall_security -v
+python3 -B -m unittest tests.test_upload_processing -v
+python3 -B -m unittest tests.test_post_call_audit -v
+```
+
+## Project Structure
+
+```text
+web_server/
+  database/
+    db.py
+    model.py
+  mcp_servers/
+    admin_server.py
+    demo_security_server.py
+    local_file_server.py
+    weather_http_server.py
+  middleware/
+    internal_jwt.py
+    pre_check.py
+    response_check.py
+  pages/
+    home.html
+  security/
+    post_call_audit.py
+  services/
+    mcp_host.py
+    upload_processing.py
+  tests/
+    test_post_call_audit.py
+    test_postcall_security.py
+    test_upload_processing.py
+  main.py
+  main_mcp.py
+  Makefile
 ```
 
 ## Security Notes
 
-This project is intended to demonstrate secure design ideas for AI systems that interact with tools and MCP servers. Depending on the implementation, security controls may include:
+This is a prototype for demonstrating MCP security concepts. It is not
+production-ready security software.
 
-- user authentication
-- authorization checks before tool execution
-- restricted file access
-- OAuth-based identity flow
-- validation of tool requests and responses
-- pre-tool and post-tool security checks
+Production hardening would require:
 
-This is a prototype and should not be treated as production-ready security software.
+- stronger structured logging and monitoring
+- stricter file type validation
+- OCR scanning before image-to-model calls
+- malware scanning for uploaded files
+- formal threat modelling
+- broader fuzz testing for prompt injection and XSS variants
+- secure deployment and secret management
 
 ## Important Files to Exclude from GitHub
 
@@ -218,17 +400,7 @@ Make sure these are included in `.gitignore`:
 venv/
 __pycache__/
 *.pyc
-oauth_tokens/
 database.db
-cache.db
-cache.db-shm
-cache.db-wal
-mcp_servers/secrets/
+security/post_call_audit.log
+user_workspaces/
 ```
-
-## Notes
-
-- Keep API keys and OAuth secrets out of source control
-- Use the local database and token cache only for development or demonstration unless properly secured
-- Review all AI-assisted code before using it in the prototype
-- The software prototype supports the report and is not the primary deliverable

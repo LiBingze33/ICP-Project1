@@ -7,7 +7,7 @@ UVICORN = $(VENV)/bin/uvicorn
 
 install:
 	python3 -m venv $(VENV)
-	$(PIP) install fastapi uvicorn jinja2 pydantic python-dotenv openai fastmcp httpx sqlalchemy authlib itsdangerous PyJWT
+	$(PIP) install fastapi uvicorn jinja2 pydantic python-dotenv openai fastmcp httpx sqlalchemy authlib itsdangerous PyJWT pypdf python-multipart
 mcp:
 	$(PYTHON) main_mcp.py
 

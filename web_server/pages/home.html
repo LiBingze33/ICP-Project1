@@ -6,6 +6,19 @@
     <title>MCP Web Chat</title>
 
     <style>
+        .image-upload {
+            margin-top: 14px;
+            padding: 12px 14px;
+            background: #f8f4ee;
+            border: 1px solid #eadccb;
+            border-radius: 12px;
+        }
+
+        .image-upload input {
+            margin-top: 8px;
+            display: block;
+        }
+
         * {
             box-sizing: border-box;
         }
@@ -166,173 +179,190 @@
             <h1>MCP Web Chat</h1>
 
             {% if user %}
-                <div class="login">
-                    Logged in as: <strong>{{ user }}</strong>
-                    <br>
-                    <a href="/logout">Logout</a>
-                </div>
+            <div class="login">
+                Logged in as: <strong>{{ user }}</strong>
+                <br>
+                <a href="/logout">Logout</a>
+            </div>
 
-                <label for="backend"><strong>Model backend:</strong></label>
-                <select id="backend">
-                    <option value="openrouter" selected>OpenRouter</option>
-                    <option value="ollama">Local model</option>
-                </select>
+            <label for="backend"><strong>Model backend:</strong></label>
+            <select id="backend">
+                <option value="openrouter" selected>OpenRouter</option>
+                <option value="ollama">Local model</option>
+            </select>
 
-                <textarea id="msg" placeholder="Ask anything, external tools might be involved"></textarea>
+            <textarea id="msg" placeholder="Ask anything, external tools might be involved"></textarea>
 
-                <div class="actions">
-                    <button id="sendBtn" onclick="send_message()">Send</button>
-                </div>
+            <div class="image-upload">
+                <label for="fileInput"><strong>Upload file:</strong></label>
+                <input type="file" id="fileInput" accept=".txt,.md,.png,.jpg,.jpeg,.pdf">
+            </div>
 
-                <pre id="out" class="output">Response will appear here...</pre>
+            <div class="actions">
+                <button id="sendBtn" onclick="send_message()">Send</button>
+            </div>
+
+            <pre id="out" class="output">Response will appear here...</pre>
             {% else %}
-                <div class="login">
-                    <a href="/login">Login with GitHub</a>
-                </div>
+            <div class="login">
+                <a href="/login">Login with GitHub</a>
+            </div>
 
-                <div class="danger-note">
-                    Please log in with GitHub before using the chat.
-                </div>
+            <div class="danger-note">
+                Please log in with GitHub before using the chat.
+            </div>
             {% endif %}
         </section>
     </main>
 
-<script>
-    async function send_message(approvedActions = []) {
-        const message = document.getElementById("msg").value;
-        const backend = document.getElementById("backend").value;
-        const out = document.getElementById("out");
-        const sendBtn = document.getElementById("sendBtn");
+    <script>
+        async function send_message(approvedActions = []) {
+            const message = document.getElementById("msg").value;
+            const backend = document.getElementById("backend").value;
+            const fileInput = document.getElementById("fileInput");
+            const out = document.getElementById("out");
+            const sendBtn = document.getElementById("sendBtn");
 
-        sendBtn.disabled = true;
-        out.textContent = "Thinking...\n";
+            sendBtn.disabled = true;
+            out.textContent = "Thinking...\n";
 
-        const res = await fetch("/chat-stream", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                message: message,
-                backend: backend,
-                approved_risky_actions: approvedActions
-            })
-        });
+            const formData = new FormData();
 
-        if (!res.ok || !res.body) {
-            out.textContent = "Request failed. Backend did not return a stream.";
-            sendBtn.disabled = false;
-            return;
-        }
+            formData.append("message", message);
+            formData.append("backend", backend);
+            formData.append("approved_risky_actions", JSON.stringify(approvedActions));
 
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-
-        let buffer = "";
-        let logs = "";
-        let finalAnswer = "";
-
-        while (true) {
-            const { value, done } = await reader.read();
-
-            if (done) {
-                break;
+            if (fileInput.files.length > 0) {
+                formData.append("uploaded_file", fileInput.files[0]);
             }
 
-            buffer += decoder.decode(value, { stream: true });
+            const res = await fetch("/chat-stream", {
+                method: "POST",
+                body: formData
+            });
 
-            const events = buffer.split("\n\n");
-            buffer = events.pop();
+            if (!res.ok || !res.body) {
+                out.textContent = "Request failed. Backend did not return a stream.";
+                sendBtn.disabled = false;
+                return;
+            }
 
-            for (const event of events) {
-                if (!event.startsWith("data: ")) {
-                    continue;
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+
+            let buffer = "";
+            let logs = "";
+            let finalAnswer = "";
+
+            while (true) {
+                const { value, done } = await reader.read();
+
+                if (done) {
+                    break;
                 }
 
-                const jsonText = event.replace("data: ", "");
+                buffer += decoder.decode(value, { stream: true });
 
-                try {
-                    const data = JSON.parse(jsonText);
+                const events = buffer.split("\n\n");
+                buffer = events.pop();
 
-                    if (data.type === "log") {
-                        logs += "• " + data.content + "\n";
-
-                        out.textContent =
-                            "Backend activity:\n" +
-                            "--------------------\n" +
-                            logs +
-                            "\nFinal answer:\n" +
-                            "--------------------\n" +
-                            "Still generating...";
+                for (const event of events) {
+                    if (!event.startsWith("data: ")) {
+                        continue;
                     }
 
-                    if (data.type === "consent_required") {
-                        logs += "• Consent required for risky action: " + data.tool_name + "\n";
+                    const jsonText = event.replace("data: ", "");
 
-                        out.textContent =
-                            "Backend activity:\n" +
-                            "--------------------\n" +
-                            logs +
-                            "\nConsent required:\n" +
-                            "--------------------\n" +
-                            data.content;
+                    try {
+                        const data = JSON.parse(jsonText);
 
-                        const filename = data.tool_args && data.tool_args.filename
-                            ? data.tool_args.filename
-                            : "unknown target";
+                        if (data.type === "log") {
+                            logs += "• " + data.content + "\n";
 
-                        const approved = confirm(
-                            data.content +
-                            "\n\nTool: " + data.tool_name +
-                            "\nTarget: " + filename +
-                            "\n\nDo you want to continue?"
-                        );
+                            out.textContent =
+                                "Backend activity:\n" +
+                                "--------------------\n" +
+                                logs +
+                                "\nFinal answer:\n" +
+                                "--------------------\n" +
+                                "Still generating...";
+                        }
 
-                        await reader.cancel();
+                        if (data.type === "consent_required") {
+                            logs += "• Consent required for risky action: " + data.tool_name + "\n";
 
-                        if (approved) {
-                            out.textContent += "\n\nUser approved. Running the request again...";
-                            await send_message([data.action_key]);
-                            return;
-                        } else {
-                            out.textContent += "\n\nAction cancelled by user. Tool was not executed.";
+                            out.textContent =
+                                "Backend activity:\n" +
+                                "--------------------\n" +
+                                logs +
+                                "\nConsent required:\n" +
+                                "--------------------\n" +
+                                data.content;
+
+                            const filename = data.tool_args && data.tool_args.filename
+                                ? data.tool_args.filename
+                                : "unknown target";
+
+                            const approved = confirm(
+                                data.content +
+                                "\n\nTool: " + data.tool_name +
+                                "\nTarget: " + filename +
+                                "\n\nDo you want to continue?"
+                            );
+
+                            await reader.cancel();
+
+                            if (approved) {
+                                out.textContent += "\n\nUser approved. Running the request again...";
+                                await send_message([data.action_key]);
+                                return;
+                            } else {
+                                out.textContent += "\n\nAction cancelled by user. Tool was not executed.";
+                                sendBtn.disabled = false;
+                                return;
+                            }
+                        }
+
+                        if (data.type === "final") {
+                            finalAnswer = data.content;
+
+                            out.textContent =
+                                "Backend activity:\n" +
+                                "--------------------\n" +
+                                logs +
+                                "\nFinal answer:\n" +
+                                "--------------------\n" +
+                                finalAnswer;
+
+                            // Clear the message box after the request is finished
+                            document.getElementById("msg").value = "";
+
+                            // Clear the uploaded file after the request is finished
+                            document.getElementById("fileInput").value = "";
+                        }
+
+                        if (data.type === "error") {
+                            out.textContent =
+                                "Backend activity:\n" +
+                                "--------------------\n" +
+                                logs +
+                                "\nError:\n" +
+                                "--------------------\n" +
+                                data.content;
+
                             sendBtn.disabled = false;
                             return;
                         }
+
+                    } catch (err) {
+                        out.textContent += "\nFailed to parse stream event: " + err;
                     }
-
-                    if (data.type === "final") {
-                        finalAnswer = data.content;
-
-                        out.textContent =
-                            "Backend activity:\n" +
-                            "--------------------\n" +
-                            logs +
-                            "\nFinal answer:\n" +
-                            "--------------------\n" +
-                            finalAnswer;
-                    }
-
-                    if (data.type === "error") {
-                        out.textContent =
-                            "Backend activity:\n" +
-                            "--------------------\n" +
-                            logs +
-                            "\nError:\n" +
-                            "--------------------\n" +
-                            data.content;
-
-                        sendBtn.disabled = false;
-                        return;
-                    }
-
-                } catch (err) {
-                    out.textContent += "\nFailed to parse stream event: " + err;
                 }
             }
-        }
 
-        sendBtn.disabled = false;
-    }
-</script>
+            sendBtn.disabled = false;
+        }
+    </script>
 
 </body>
 

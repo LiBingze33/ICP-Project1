@@ -8,8 +8,10 @@ from dotenv import load_dotenv
 from fastmcp import Client
 from openai import OpenAI
 from fastmcp.client.transports import StreamableHttpTransport
-from middleware.response_check import check_response
+from middleware.response_check import check_response_details
 from middleware.pre_check import PreCheckMiddleware
+from security.post_call_audit import log_post_call_event
+import base64
 load_dotenv()
 
 TOOL_POLICIES = {
@@ -40,6 +42,17 @@ TOOL_POLICIES = {
         "admin_list_users",
     },
 },
+    "demo": {
+        "prompt": "demo_demo_style",
+        "allowed_tools": {
+            "demo_safe_health_check",
+            "demo_safe_public_info",
+            "demo_safe_echo",
+            "demo_fake_secret_api",
+            "demo_fake_desktop_info_api",
+            "demo_fake_error_status_api",
+        },
+    },
 }
 
 
@@ -58,6 +71,13 @@ RISKY_TOOL_RULES = {
     # },
 }
 
+def image_to_data_url(image_bytes: bytes, mime_type: str) -> str:
+    """
+    Convert uploaded image bytes into a base64 data URL
+    that can be sent to a vision-capable model.
+    """
+    encoded_image = base64.b64encode(image_bytes).decode("utf-8")
+    return f"data:{mime_type};base64,{encoded_image}"
 
 def build_action_key(tool_name: str, tool_args: dict) -> str:
     """
@@ -117,12 +137,30 @@ openrouter_client = OpenAI(
 )
 
 def classify_context_with_ai(user_message: str, backend: str = "openrouter") -> str:
+    lowered_message = user_message.lower()
+
+    if any(
+        phrase in lowered_message
+        for phrase in {
+            "demo api",
+            "fake api",
+            "fake desktop",
+            "fake secret",
+            "harmful api",
+            "post-call demo",
+            "postcall demo",
+            "security demo",
+            "suspicious api",
+        }
+    ):
+        return "demo"
+
     messages = [
         {
             "role": "system",
             "content": (
                 "Classify the user's request into exactly one category: "
-                "files, weather, admin or general. "
+                "files, weather, admin, demo or general. "
                 "Return only one word. "
                 "Use files if the user wants to list, read, create, write, delete, "
                 "open, show, or summarise local files, folders, documents, notes, "
@@ -131,6 +169,8 @@ def classify_context_with_ai(user_message: str, backend: str = "openrouter") -> 
                 "rain, alerts, or location weather. "
                 "Use admin if the user asks about application users, database users, user roles, "
                 "user count, admin status, or system user management. "
+                "Use demo if the user asks for a security demo, post-call demo, "
+                "fake harmful API, fake secret API, fake desktop API, or suspicious API test. "
                 "Use general if no tool is needed."
             ),
         },
@@ -149,10 +189,39 @@ def classify_context_with_ai(user_message: str, backend: str = "openrouter") -> 
 
     category = (result.choices[0].message.content or "").strip().lower()
 
-    if category not in {"files", "weather", "general", "admin"}:
+    if category not in {"files", "weather", "general", "admin", "demo"}:
         return "general"
 
     return category
+
+def get_content_block_value(block, key: str):
+    if isinstance(block, dict):
+        return block.get(key)
+
+    return getattr(block, key, None)
+
+
+def extract_content_block_text(block) -> str | None:
+    block_text = get_content_block_value(block, "text")
+
+    if block_text is not None:
+        return str(block_text)
+
+    block_type = get_content_block_value(block, "type")
+    mime_type = (
+        get_content_block_value(block, "mimeType")
+        or get_content_block_value(block, "mime_type")
+        or ""
+    )
+
+    if block_type in {"image", "image_url"} or str(mime_type).startswith("image/"):
+        return "[image tool output omitted by post-call security]"
+
+    if block_type:
+        return f"[{block_type} tool output omitted by post-call security]"
+
+    return None
+
 
 def extract_tool_text(tool_result) -> str:
     """
@@ -177,17 +246,144 @@ def extract_tool_text(tool_result) -> str:
         # If content is already a string, return it directly.
         if isinstance(content, str):
             return content
-        # If content is a list, extract text from each item.
-        # Some MCP results return content as a list of text blocks.
+        # If content is a list, extract text from text blocks and safely
+        # represent non-text blocks instead of stringifying raw payloads.
         if isinstance(content, list):
-            return "\n".join(getattr(item, "text", str(item)) for item in content)
-        # If content exists but is not a string or list,
-        # convert it to a string as a fallback.
-        return str(content)
+            extracted_blocks = []
+            for item in content:
+                extracted_text = extract_content_block_text(item)
+                if extracted_text is not None:
+                    extracted_blocks.append(extracted_text)
+                else:
+                    extracted_blocks.append(
+                        "[non-text tool output omitted by post-call security]"
+                    )
+
+            return "\n".join(extracted_blocks)
+
+        extracted_text = extract_content_block_text(content)
+        if extracted_text is not None:
+            return extracted_text
+
+        return "[non-text tool output omitted by post-call security]"
 
     # If there is no "content" field, try to get a "text" field.
-    # If that also does not exist, convert the whole result to a string.
-    return getattr(tool_result, "text", str(tool_result))
+    text = getattr(tool_result, "text", None)
+    if text is not None:
+        return str(text)
+
+    return "[non-text tool result omitted by post-call security]"
+
+
+def post_call_decision(response_check) -> str:
+    if response_check.blocked:
+        return "blocked"
+
+    if response_check.modified:
+        return "modified"
+
+    return "allowed"
+
+
+async def write_post_call_audit(
+    *,
+    emit,
+    user: dict,
+    tool_name: str,
+    tool_args: dict,
+    status: str,
+    duration_ms: int,
+    output_chars: int = 0,
+    decision: str = "error",
+    blocked: bool = False,
+    modified: bool = False,
+    reason: str = "",
+    error: str | None = None,
+) -> None:
+    try:
+        log_post_call_event(
+            {
+                "tool_name": tool_name,
+                "tool_args": tool_args,
+                "user_id": user.get("user_id"),
+                "github_login": user.get("login"),
+                "role": user.get("role", "user"),
+                "status": status,
+                "duration_ms": duration_ms,
+                "output_chars": output_chars,
+                "decision": decision,
+                "blocked": blocked,
+                "modified": modified,
+                "reason": reason,
+                "error": error,
+            }
+        )
+    except Exception as audit_error:
+        await emit_log(emit, f"Post-call audit logging failed: {audit_error}")
+    else:
+        await emit_log(emit, f"Post-call audit logged: {decision}")
+
+
+async def call_mcp_tool_with_postcheck(
+    *,
+    mcp_client,
+    tool_name: str,
+    tool_args: dict,
+    user: dict,
+    emit,
+) -> str:
+    start_time = time.perf_counter()
+
+    try:
+        tool_result = await mcp_client.call_tool(tool_name, tool_args)
+    except Exception as exc:
+        duration_ms = int((time.perf_counter() - start_time) * 1000)
+        await write_post_call_audit(
+            emit=emit,
+            user=user,
+            tool_name=tool_name,
+            tool_args=tool_args,
+            status="error",
+            duration_ms=duration_ms,
+            decision="error",
+            reason="tool call failed",
+            error=str(exc),
+        )
+        raise
+
+    duration_ms = int((time.perf_counter() - start_time) * 1000)
+    await emit_log(emit, f"MCP tool finished: {tool_name}")
+
+    tool_text = extract_tool_text(tool_result)
+    await emit_log(emit, "Tool result extracted.")
+
+    response_check = check_response_details(
+        tool_text,
+        source=f"Tool output from {tool_name}"
+    )
+    decision = post_call_decision(response_check)
+
+    if response_check.blocked or response_check.modified:
+        await emit_log(
+            emit,
+            f"Tool output blocked or modified by response check: {tool_name}"
+        )
+
+    await write_post_call_audit(
+        emit=emit,
+        user=user,
+        tool_name=tool_name,
+        tool_args=tool_args,
+        status="success",
+        duration_ms=duration_ms,
+        output_chars=len(tool_text),
+        decision=decision,
+        blocked=response_check.blocked,
+        modified=response_check.modified,
+        reason=response_check.reason,
+    )
+
+    return response_check.text
 
 
 def choose_context(user_message: str, backend: str = "openrouter") -> tuple[str, set[str]]:
@@ -294,7 +490,15 @@ async def emit_log(emit, message: str):
         await emit(message)
         await asyncio.sleep(0.2)
 
-async def run_agent(user_message: str, user: dict, backend: str = "openrouter", emit=None, approved_risky_actions: list[str] | None = None,) -> str:
+async def run_agent(
+    user_message: str,
+    user: dict,
+    backend: str = "openrouter",
+    emit=None,
+    approved_risky_actions: list[str] | None = None,
+    image_bytes: bytes | None = None,
+    image_mime_type: str | None = None,
+) -> str:
     """
     user comes from FastAPI session after GitHub OAuth login.
     """
@@ -355,16 +559,42 @@ async def run_agent(user_message: str, user: dict, backend: str = "openrouter", 
             if text:
                 messages.append({"role": m.role, "content": text})
 
-        messages.append(
-            {
-                "role": "user",
-                "content": (
-                    f"Authenticated GitHub user: {github_login}\n"
-                    f"User role: {role}\n\n"
-                    f"User request: {user_message}"
-                ),
-            }
+        user_text = (
+            f"Authenticated GitHub user: {github_login}\n"
+            f"User role: {role}\n\n"
+            f"User request: {user_message}"
         )
+        # If the user uploaded an image, convert it to a data URL and include it in the message content.
+        # Otherwise, if it is a normal file upload or no upload, just send the text content as before.
+        if image_bytes is not None and image_mime_type is not None:
+            await emit_log(emit, "Image received. Adding image to model message.")
+
+            image_data_url = image_to_data_url(image_bytes, image_mime_type)
+
+            messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": user_text,
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image_data_url,
+                            },
+                        },
+                    ],
+                }
+            )
+        else:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": user_text,
+                }
+            )
 
         await emit_log(emit, "Messages prepared.")
 
@@ -533,24 +763,14 @@ async def run_agent(user_message: str, user: dict, backend: str = "openrouter", 
 
                 await emit_log(emit, f"Calling MCP tool: {tool_name}")
 
-                # Call MCP tool internally only after validation and consent
-                tool_result = await mcp_client.call_tool(tool_name, tool_args)
-
-                await emit_log(emit, f"MCP tool finished: {tool_name}")
-
-                tool_text = extract_tool_text(tool_result)
-                await emit_log(emit, "Tool result extracted.")
-
-                # Post-tool response check
-                checked_text = check_response(
-                    tool_text,
-                    source=f"Tool output from {tool_name}"
+                tool_text = await call_mcp_tool_with_postcheck(
+                    mcp_client=mcp_client,
+                    tool_name=tool_name,
+                    tool_args=tool_args,
+                    user=user,
+                    emit=emit,
                 )
 
-                if checked_text != tool_text:
-                    await emit_log(emit, f"Tool output blocked or modified by response check: {tool_name}")
-
-                tool_text = checked_text
                 await emit_log(emit, "Tool result checked and prepared for model.")
                 messages.append(
                     {
@@ -579,7 +799,12 @@ async def run_agent(user_message: str, user: dict, backend: str = "openrouter", 
         final_response = "\n".join(part for part in final_parts if part).strip()
 
         await emit_log(emit, "Running final response check.")
-        final_response = check_response(final_response, source="Final response")
+        final_check = check_response_details(final_response, source="Final response")
+
+        if final_check.blocked or final_check.modified:
+            await emit_log(emit, "Final response blocked or modified by response check.")
+
+        final_response = final_check.text
 
         await emit_log(emit, "Final response generated.")
         return final_response
