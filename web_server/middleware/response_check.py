@@ -1,3 +1,20 @@
+
+#the file provides the post-call output security layer for the application. It checks text after it has already been produced by a tool, API,
+#uploaded-file extractor, or final LLM response. It is used to stop dangerous output from being passed back to the model or shown to the user.
+
+# Main connections:
+# - services/mcp_host.py calls check_response_details() after MCP tools finish.
+# - services/mcp_host.py also calls check_response_details() on the final LLM answer.
+# - main.py calls check_response_details() after extracting uploaded TXT/PDF content.
+# - security/post_call_audit.py receives the post-call decision through mcp_host.py.
+#
+# Overall flow:
+# raw output
+# -> decode URL/HTML encoded variants
+# -> normalise whitespace
+# -> create compact forms for obfuscated payload detection
+# -> check for secrets, prompt injection, XSS, suspicious API status, and local data leakage
+# -> block, redact, or allow
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,6 +23,8 @@ import re
 from urllib.parse import unquote
 
 
+#small result object returned by the checker. It stores the final safe text plus metadata showing whether the output was blocked,
+#modified, and why. mcp_host.py uses this metadata for logging and audit decisions.
 @dataclass(frozen=True)
 class ResponseCheckResult:
     text: str
@@ -13,7 +32,7 @@ class ResponseCheckResult:
     modified: bool = False
     reason: str = ""
 
-
+#Regex patterns for detecting secret-like output. This includes API keys, client secrets, passwords, bearer tokens, JWT-like values, GitHub tokens, AWS-style access keys, and private key headers.
 SECRET_PATTERNS = (
     re.compile(
         r"(?i)\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|"
@@ -33,6 +52,9 @@ SECRET_PATTERNS = (
     re.compile(r"-----BEGIN [A-Z ]+PRIVATE KEY-----"),
 )
 
+# PROMPT_INJECTION_PATTERNS
+#Regex patterns for detecting output that attempts to control or bypass the model. 
+#Examples include "ignore previous instructions", "reveal the system prompt", "bypass security", "act as admin", or similar instruction-injection language
 PROMPT_INJECTION_PATTERNS = (
     re.compile(r"(?i)\bignore\s+(?:all\s+)?previous\s+instructions\b"),
     re.compile(r"(?i)\breveal\s+(?:the\s+)?system\s+prompt\b"),
@@ -46,6 +68,9 @@ PROMPT_INJECTION_PATTERNS = (
     re.compile(r"(?i)<\s*script\b"),
 )
 
+#XSS
+#Direct regex checks for obvious XSS-related content. it catches visible forms such as <script>, javascript:, vbscript:, data:text/html,
+#event handler attributes, and descriptions of XSS payloads or bypasses.
 XSS_PATTERNS = (
     re.compile(r"(?i)<\s*script\b"),
     re.compile(r"(?i)\bjavascript\s*:"),
@@ -85,12 +110,15 @@ XSS_EXECUTION_MARKERS = (
     "setinterval",
 )
 
+#XSS_EVENT_HANDLER_RE
+#Regex for detecting event-handler based XSS payloads. It catches patterns like onerror=alert(1), onclick=fetch(...), or onload=eval(...) after the text has been compacted.
 XSS_EVENT_HANDLER_RE = re.compile(
     r"on(?:abort|blur|change|click|error|focus|input|load|mouseover|submit)"
     r"[a-z0-9]{0,80}"
     r"(?:alert|confirm|prompt|eval|fetch|documentcookie|settimeout|setinterval)"
 )
-
+# SUSPICIOUS_STATUS_PATTERNS for the API outputs
+#Detects suspicious API or HTTP status outputs. For the demo, statuses such as 401, 403, 429, 500, 502, and 503 can indicate failed, blocked, rate-limited, or unstable API behaviour.
 SUSPICIOUS_STATUS_PATTERNS = (
     re.compile(
         r"(?i)\b(?:api|http|upstream)?\s*status\s*[:=]?\s*"
@@ -98,6 +126,7 @@ SUSPICIOUS_STATUS_PATTERNS = (
     ),
 )
 
+#Detects output that appears to expose local Desktop paths or desktop file listings. This is used to demonstrate blocking local data leakage from unsafe tools or APIs.
 LOCAL_DATA_EXFILTRATION_PATTERNS = (
     re.compile(r"(?i)\bdesktop\s+(?:path|listing|files|contents)\b"),
     re.compile(r"(?i)\b[A-Z]:\\Users\\[^\r\n\"'<>|]*\\Desktop\b"),
@@ -105,24 +134,16 @@ LOCAL_DATA_EXFILTRATION_PATTERNS = (
     re.compile(r"(?i)/(?:Users|home)/[^\r\n\"'<>|]*/Desktop\b"),
 )
 
+#Regex patterns for local machine paths on Windows, WSL, macOS, and Linux
 LOCAL_PATH_REDACTIONS = (
     re.compile(r"(?i)\b[A-Z]:\\Users\\[^\r\n\"'<>|]+"),
     re.compile(r"(?i)/mnt/[a-z]/Users/[^\r\n\"'<>|]+"),
     re.compile(r"(?i)/(?:Users|home)/[^\r\n\"'<>|]+"),
 )
 
-#unused imports that might be needed in the future
-# def check_response(text: str, source: str = "response") -> str:
-#     """
-#     General post-call response check.
-
-#     It can be used for:
-#     - MCP tool output before sending it back to the model
-#     - final LLM response before sending it back to the user
-#     """
-#     return check_response_details(text, source=source).text
-
-
+# Main post-call checking function.
+#It converts non-string output to text, builds canonicalised inspection variants, checks for secrets, prompt injection, XSS, suspicious API statuses, and local data leakage.
+#It returns a ResponseCheckResult showing whether the output is allowed, blocked, or modified.
 def check_response_details(text: str, source: str = "response") -> ResponseCheckResult:
     if text is None:
         return ResponseCheckResult("")
@@ -175,14 +196,15 @@ def check_response_details(text: str, source: str = "response") -> ResponseCheck
         reason="local path redacted" if redacted_text != text else "",
     )
 
-
+# Replaces local filesystem paths with [local-path-hidden] to reduce the exposure of machine path
 def redact_local_paths(text: str) -> str:
     redacted = text
     for pattern in LOCAL_PATH_REDACTIONS:
         redacted = pattern.sub("[local-path-hidden]", redacted)
     return redacted
 
-
+#create standard block
+#It returns a safe message like "Final response blocked by security policy: ..."
 def _blocked(source: str, reason: str) -> ResponseCheckResult:
     return ResponseCheckResult(
         f"{source} blocked by security policy: {reason}",
@@ -195,14 +217,21 @@ def _blocked(source: str, reason: str) -> ResponseCheckResult:
 def _matches_any(patterns: tuple[re.Pattern[str], ...], value: str) -> bool:
     return any(pattern.search(value) for pattern in patterns)
 
-
+#Main XSS detection function.
+#It first checks obvious readable XSS patterns, then checks compact canonicalised variants to catch obfuscation such as URL encoding, HTML entities, spaces,
+#tabs, newlines, or mixed punctuatio
 def has_xss_content(inspection_text: str, compact_values: set[str]) -> bool:
     if _matches_any(XSS_PATTERNS, inspection_text):
         return True
 
     return any(_compact_value_has_xss_payload(value) for value in compact_values)
 
-
+# Detects structural XSS patterns in compacted text.
+# It looks for dangerous combinations such as:
+# - HTML attribute marker + dangerous scheme
+# - dangerous scheme + execution marker
+# - event handler + execution marker
+# - script marker + execution marker
 def _compact_value_has_xss_payload(value: str) -> bool:
     if XSS_EVENT_HANDLER_RE.search(value):
         return True

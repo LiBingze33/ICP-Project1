@@ -1,3 +1,7 @@
+
+#mcp_servers/admin_server.py
+#defines admin-only MCP tools for viewing application user information.
+#these tools are exposed only when the authenticated user has the correct role.
 from fastmcp import FastMCP
 
 from database.db import SessionLocal

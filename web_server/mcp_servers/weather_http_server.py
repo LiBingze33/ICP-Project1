@@ -1,3 +1,7 @@
+#defines MCP tools that call the online National Weather Service API.
+#it demonstrates how the app can safely route external API calls through MCP
+#tools instead of letting the model call APIs directly.
+
 from typing import Any
 import httpx
 from fastmcp import FastMCP

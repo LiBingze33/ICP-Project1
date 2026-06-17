@@ -1,3 +1,8 @@
+# main_mcp.py
+# Starts the parent MCP server and mounts the weather, file, admin, and security
+# demo MCP servers. It also applies internal JWT, rate limiting, and response
+# size middleware
+
 from fastmcp import FastMCP
 
 from middleware.internal_jwt import InternalJWTMiddleware

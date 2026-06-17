@@ -1,3 +1,20 @@
+# This is the central bridge between the web app, LLM and the MCP tools
+# pages/home.html
+# -> main.py
+# -> services/mcp_host.py
+# -> OpenRouter/Ollama LLM
+# -> main_mcp.py
+# -> MCP tool servers
+# -> response_check.py
+# -> post_call_audit.py
+# -> main.py
+# -> pages/home.html
+
+
+# It is called by main.py after a user submits a web request, connects to the LLM
+# backend and MCP server, decides which tools are allowed, validates tool calls,
+# runs post-call security checks, writes audit logs, and returns the final safe
+# response to the FastAPI stream.
 import json
 import os
 import time
