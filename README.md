@@ -380,7 +380,6 @@ web_server/
 
 This is a prototype for demonstrating MCP security concepts. It is not
 production-ready security software.
-
 Production hardening would require:
 
 - stronger structured logging and monitoring
