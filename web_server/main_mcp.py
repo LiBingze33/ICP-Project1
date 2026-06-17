@@ -4,6 +4,7 @@ from middleware.internal_jwt import InternalJWTMiddleware
 from mcp_servers.weather_http_server import weather_mcp
 from mcp_servers.local_file_server import file_mcp
 from mcp_servers.admin_server import admin_mcp
+from mcp_servers.demo_security_server import demo_mcp
 from fastmcp.server.middleware.rate_limiting import RateLimitingMiddleware
 from fastmcp.server.middleware.response_limiting import ResponseLimitingMiddleware
 
@@ -25,6 +26,7 @@ main_mcp.add_middleware(ResponseLimitingMiddleware(max_size=100_000))
 main_mcp.mount(weather_mcp, namespace="weather")
 main_mcp.mount(file_mcp, namespace="files")
 main_mcp.mount(admin_mcp, namespace="admin")
+main_mcp.mount(demo_mcp, namespace="demo")
 
 @main_mcp.prompt()
 async def general_style() -> str:
