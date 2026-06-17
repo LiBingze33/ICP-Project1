@@ -12,9 +12,9 @@ SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
 
-def get_db():
-    session = SessionLocal()
-    try:
-        yield session
-    finally:
-        session.close()
+# def get_db():
+#     session = SessionLocal()
+#     try:
+#         yield session
+#     finally:
+#         session.close()

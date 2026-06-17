@@ -111,16 +111,16 @@ LOCAL_PATH_REDACTIONS = (
     re.compile(r"(?i)/(?:Users|home)/[^\r\n\"'<>|]+"),
 )
 
+#unused imports that might be needed in the future
+# def check_response(text: str, source: str = "response") -> str:
+#     """
+#     General post-call response check.
 
-def check_response(text: str, source: str = "response") -> str:
-    """
-    General post-call response check.
-
-    It can be used for:
-    - MCP tool output before sending it back to the model
-    - final LLM response before sending it back to the user
-    """
-    return check_response_details(text, source=source).text
+#     It can be used for:
+#     - MCP tool output before sending it back to the model
+#     - final LLM response before sending it back to the user
+#     """
+#     return check_response_details(text, source=source).text
 
 
 def check_response_details(text: str, source: str = "response") -> ResponseCheckResult:
