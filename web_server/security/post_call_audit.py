@@ -1,5 +1,15 @@
-from __future__ import annotations
 
+# User prompt in web app
+# -> main.py
+# -> run_agent() in services/mcp_host.py
+# -> MCP tool is called
+# -> post-call checker runs
+# -> audit logger writes post_call_audit.logfrom __future__ import annotations
+
+#the trigger is in services/mcp_host.py 
+#async def call_mcp_tool_with_postcheck()
+#Then call await write_post_call_audit()
+# --> log_post_call_event --> writes to web_server/secuirty/post_call_audit.log
 from datetime import datetime, timezone
 import json
 from pathlib import Path

@@ -2,6 +2,9 @@ from datetime import datetime
 from sqlalchemy import Column, DateTime, Integer, String
 from .db import Base
 
+#database/model.py
+#Defines the SQLAlchemy database models used by the web app.
+#The User model stores GitHub identity, role, and private workspace information.
 #SQLAlchemy maps
 #Python class: User
 #Database tableL users

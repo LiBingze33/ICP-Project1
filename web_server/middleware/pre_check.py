@@ -1,3 +1,8 @@
+#provides the pre-call security layer for file-related MCP tools and uploaded/user-provided text.
+#it checks tool arguments before execution, validates file paths, blocks path traversal and sensitive
+#filenames, enforces basic CRUD permissions, and prevents unsafe content such as XSS or SQL injection
+#payloads from being written to or read from the user workspace.
+
 from __future__ import annotations
 
 import html
@@ -10,6 +15,8 @@ import mcp.types as mcp_types
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 
 
+#FastMCP middleware class that intercepts file tool calls before they run.
+#It applies path validation, permission checks, delete confirmation, unsafe input detection, and read-output inspection for file tools such as list_files, read_file, create_file, and delete_file.
 class PreCheckMiddleware(Middleware):
     """FastMCP middleware that enforces file tool security rules."""
 
@@ -117,6 +124,9 @@ class PreCheckMiddleware(Middleware):
             "delete": True,
         }
 
+    # Main middleware entry point that runs whenever an MCP tool is called.
+    # It only applies security checks to file tools; other tools pass through unchanged.
+    # For file tools, it validates arguments before execution and checks read_file output after execution.
     async def on_call_tool(
         self,
         context: MiddlewareContext[mcp_types.CallToolRequestParams],
@@ -149,6 +159,8 @@ class PreCheckMiddleware(Middleware):
 
         return result
 
+    #Validates and resolves a user-supplied filename safely.
+    #It rejects empty names, non-string values, absolute paths, parent-directory traversal such as ../,paths outside the workspace, and sensitive filenames like .env or private key files.
     def validate_path(self, filename: Any) -> Path:
         # Reject empty or non-string paths before touching the filesystem.
         if not isinstance(filename, str) or not filename.strip():
@@ -177,7 +189,7 @@ class PreCheckMiddleware(Middleware):
             raise ValueError("Access to sensitive file is denied.")
 
         return resolved_path
-
+    # Decides which permission is required for the requested file operation.
     def _check_operation_policy(
         self,
         tool_name: str,
@@ -227,7 +239,10 @@ class PreCheckMiddleware(Middleware):
             for pattern in cls.SQLI_PATTERNS
         ):
             raise ValueError("Input contains a blocked SQL injection pattern.")
-
+        
+        
+    #builds multiple normalised versions of the input text for detection.
+    #it URL-decodes, HTML-decodes, expands/removes SQL comments, and normalises whitespace so obfuscated payloads are easier to detect.
     @classmethod
     def _inspection_values(cls, value: str) -> set[str]:
         # Decode common encodings and normalize comments before pattern matching.

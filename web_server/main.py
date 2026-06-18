@@ -1,3 +1,6 @@
+# Starts the FastAPI web app, handles GitHub login, validates sessions, and
+# streams chat responses to the frontend. It also handles uploaded files and
+# scans extracted content before sending it to the agent.
 import os
 import json
 import asyncio

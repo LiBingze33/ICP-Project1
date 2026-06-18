@@ -1,3 +1,7 @@
+#defines MCP tools for listing, reading, creating, and deleting files inside a
+#user's private workspace. File paths are restricted so users cannot access
+#another user's files or arbitrary system paths.
+
 from pathlib import Path
 from fastmcp import FastMCP
 

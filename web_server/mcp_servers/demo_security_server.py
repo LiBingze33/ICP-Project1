@@ -1,3 +1,7 @@
+#provides safe demo MCP tools that simulate suspicious API responses.
+#these tools are used to demonstrate post-call blocking without accessing real
+#secrets, real Desktop files, or harmful external services.
+
 from fastmcp import FastMCP
 
 
