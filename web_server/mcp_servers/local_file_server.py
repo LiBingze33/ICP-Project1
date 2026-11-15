@@ -1,14 +1,52 @@
-from pathlib import Path
+#defines MCP tools for listing, reading, creating, and deleting files inside a
+#user's private workspace. File paths are restricted so users cannot access
+#another user's files or arbitrary system paths.
 
+from pathlib import Path
 from fastmcp import FastMCP
 
-mcp = FastMCP("file_server")
-#Creates a FastMCP server object
-BASE_DIR = Path(__file__).parent / "demo_docs"
-BASE_DIR.mkdir(exist_ok=True)
+file_mcp = FastMCP("file_server")
+
+# This should match the workspace root used in main.py
+BASE_WORKSPACE_DIR = Path("user_workspaces").resolve()
+BASE_WORKSPACE_DIR.mkdir(exist_ok=True)
 
 
-@mcp.prompt()
+def get_user_dir(workspace_path: str) -> Path | None:
+    """
+    Convert workspace_path into a safe Path.
+    Only allow folders inside BASE_WORKSPACE_DIR.
+    """
+    if not workspace_path:
+        return None
+
+    user_dir = Path(workspace_path).resolve()
+
+    # Make sure the path is still inside user_workspaces
+    try:
+        user_dir.relative_to(BASE_WORKSPACE_DIR)
+    except ValueError:
+        return None
+
+    user_dir.mkdir(parents=True, exist_ok=True)
+
+    return user_dir
+
+def safe_path(filename: str, workspace_path: str) -> Path | None:
+    """
+    Only allow plain filenames inside the logged-in user's workspace folder.
+    """
+    if not filename or "/" in filename or "\\" in filename or ".." in filename:
+        return None
+
+    user_dir = get_user_dir(workspace_path)
+    if user_dir is None:
+        return None
+
+    return user_dir / filename
+
+
+@file_mcp.prompt()
 async def file_style() -> str:
     return (
         "When presenting any result from the file MCP server, "
@@ -17,33 +55,29 @@ async def file_style() -> str:
     )
 
 
-@mcp.tool()
-async def list_files() -> str:
-    """List files in the demo_docs folder."""
-    files = []
-    #iterdir() go through everything inside this folder
-    for p in BASE_DIR.iterdir():
-        #is_file() check whether this path is a file
-        if p.is_file():
-            files.append(p.name)
+@file_mcp.tool()
+async def list_files(workspace_path: str = "") -> str:
+    """List files in the current user's private workspace folder."""
+    user_dir = get_user_dir(workspace_path)
 
-    if not files:
-        return "No files found."
+    if user_dir is None:
+        return "Invalid user workspace."
 
-    return "\n".join(files)
+    files = [p.name for p in user_dir.iterdir() if p.is_file()]
+
+    return "No files found in your private folder." if not files else "\n".join(files)
 
 
-@mcp.tool()
-async def read_file(filename: str) -> str:
-    """Read a file from the demo_docs folder.
+@file_mcp.tool()
+async def read_file(filename: str, workspace_path: str = "") -> str:
+    """Read a file from the current user's private workspace folder."""
+    path = safe_path(filename, workspace_path)
 
-    Args:
-        filename: Name of the file to read
-    """
-    path = BASE_DIR / filename
+    if path is None:
+        return "Invalid filename or user workspace."
 
     if not path.exists():
-        return f"File '{filename}' does not exist."
+        return f"File '{filename}' does not exist in your private folder."
 
     if not path.is_file():
         return f"'{filename}' is not a file."
@@ -52,15 +86,15 @@ async def read_file(filename: str) -> str:
         return path.read_text(encoding="utf-8")
     except Exception:
         return f"Unable to read file '{filename}'."
-@mcp.tool()
-async def create_file(filename: str, content: str) -> str:
-    """Create a file inside the demo_docs folder.
 
-    Args:
-        filename: Name of the file to create
-        content: Text content to write into the file
-    """
-    path = BASE_DIR / filename
+
+@file_mcp.tool()
+async def create_file(filename: str, content: str, workspace_path: str = "") -> str:
+    """Create a file inside the current user's private workspace folder."""
+    path = safe_path(filename, workspace_path)
+
+    if path is None:
+        return "Invalid filename or user workspace."
 
     if path.exists():
         return f"File '{filename}' already exists."
@@ -70,14 +104,15 @@ async def create_file(filename: str, content: str) -> str:
         return f"File '{filename}' created successfully."
     except Exception:
         return f"Unable to create file '{filename}'."
-@mcp.tool()
-async def delete_file(filename: str) -> str:
-    """Delete a file from the demo_docs folder.
 
-    Args:
-        filename: Name of the file to delete
-    """
-    path = BASE_DIR / filename
+
+@file_mcp.tool()
+async def delete_file(filename: str, workspace_path: str = "") -> str:
+    """Delete a file from the current user's private workspace folder."""
+    path = safe_path(filename, workspace_path)
+
+    if path is None:
+        return "Invalid filename or user workspace."
 
     if not path.exists():
         return f"File '{filename}' does not exist."
@@ -90,5 +125,3 @@ async def delete_file(filename: str) -> str:
         return f"File '{filename}' deleted successfully."
     except Exception:
         return f"Unable to delete file '{filename}'."
-if __name__ == "__main__":
-    mcp.run(transport="http", host="127.0.0.1", port=9001)

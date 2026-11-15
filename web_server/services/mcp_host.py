@@ -1,101 +1,627 @@
+# This is the central bridge between the web app, LLM and the MCP tools
+# pages/home.html
+# -> main.py
+# -> services/mcp_host.py
+# -> OpenRouter/Ollama LLM
+# -> main_mcp.py
+# -> MCP tool servers
+# -> response_check.py
+# -> post_call_audit.py
+# -> main.py
+# -> pages/home.html
+
+
+# It is called by main.py after a user submits a web request, connects to the LLM
+# backend and MCP server, decides which tools are allowed, validates tool calls,
+# runs post-call security checks, writes audit logs, and returns the final safe
+# response to the FastAPI stream.
 import json
 import os
-
+import time
+import jwt
+import asyncio
+from pathlib import Path
 from dotenv import load_dotenv
 from fastmcp import Client
-from fastmcp.client.transports import StreamableHttpTransport
 from openai import OpenAI
-
+from fastmcp.client.transports import StreamableHttpTransport
+from middleware.response_check import check_response_details
+from middleware.pre_check import PreCheckMiddleware
+from security.post_call_audit import log_post_call_event
+import base64
 load_dotenv()
 
-WEATHER_MCP_URL = "http://127.0.0.1:9000/mcp"
-FILE_MCP_URL = "http://127.0.0.1:9001/mcp"
-llm_client = OpenAI(
+TOOL_POLICIES = {
+    "general": {
+        "prompt": "general_style",
+        "allowed_tools": set(),
+    },
+    "weather": {
+        "prompt": "weather_bing_weather_style",
+        "allowed_tools": {
+            "weather_get_alerts",
+            "weather_get_forecast",
+            "weather_get_user_info",
+        },
+    },
+    "files": {
+        "prompt": "files_file_style",
+        "allowed_tools": {
+            "files_list_files",
+            "files_read_file",
+            "files_create_file",
+            "files_delete_file",
+        },
+    },
+    "admin": {
+    "prompt": "admin_admin_style",
+    "allowed_tools": {
+        "admin_list_users",
+    },
+},
+    "demo": {
+        "prompt": "demo_demo_style",
+        "allowed_tools": {
+            "demo_safe_health_check",
+            "demo_safe_public_info",
+            "demo_safe_echo",
+            "demo_fake_secret_api",
+            "demo_fake_desktop_info_api",
+            "demo_fake_error_status_api",
+        },
+    },
+}
+
+
+RISKY_TOOL_RULES = {
+    "files_delete_file": {
+        "requires_consent": True,
+        "description": "This action will delete a file from your workspace.",
+    },
+
+    # You can add more risky tools later.
+    # Example:
+    # "files_create_file": {
+    #     "level": "medium",
+    #     "requires_consent": True,
+    #     "description": "This action will create or overwrite a file.",
+    # },
+}
+
+def image_to_data_url(image_bytes: bytes, mime_type: str) -> str:
+    """
+    Convert uploaded image bytes into a base64 data URL
+    that can be sent to a vision-capable model.
+    """
+    encoded_image = base64.b64encode(image_bytes).decode("utf-8")
+    return f"data:{mime_type};base64,{encoded_image}"
+
+def build_action_key(tool_name: str, tool_args: dict) -> str:
+    """
+    Create a specific approval key for a tool action.
+
+    Example:
+    files_delete_file:test.txt
+    """
+    if tool_name in {
+        "files_delete_file",
+    }:
+        filename = tool_args.get("filename", "")
+        return f"{tool_name}:{filename}"
+
+    return tool_name
+
+
+def assess_tool_risk(tool_name: str, tool_args: dict) -> dict:
+    """
+    Check whether a tool requires user consent.
+    """
+    rule = RISKY_TOOL_RULES.get(tool_name)
+    #jf the policy is not in the risky-tool list
+    if not rule:
+        return {
+            "requires_consent": False,
+            "description": "No consent required.",
+            "action_key": build_action_key(tool_name, tool_args),
+        }
+
+    return {
+        "requires_consent": rule["requires_consent"],
+        "description": rule["description"],
+        "action_key": build_action_key(tool_name, tool_args),
+    }
+
+
+
+# MCP is called internally by FastAPI after the user has logged in.
+# For VM deployment, keep this as 127.0.0.1 because MCP runs on the same VM.
+MCP_URL = "http://127.0.0.1:9000/mcp"
+
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "anthropic/claude-sonnet-4.5")
+INTERNAL_JWT_SECRET = os.getenv("INTERNAL_JWT_SECRET")
+if not INTERNAL_JWT_SECRET:
+    raise RuntimeError("INTERNAL_JWT_SECRET is missing from .env")
+ollama_client = OpenAI(
+    base_url=OLLAMA_BASE_URL,
+    api_key="ollama",
+)
+
+openrouter_client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY"),
 )
+
+def classify_context_with_ai(user_message: str, backend: str = "openrouter") -> str:
+    lowered_message = user_message.lower()
+
+    if any(
+        phrase in lowered_message
+        for phrase in {
+            "demo api",
+            "fake api",
+            "fake desktop",
+            "fake secret",
+            "harmful api",
+            "post-call demo",
+            "postcall demo",
+            "security demo",
+            "suspicious api",
+        }
+    ):
+        return "demo"
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Classify the user's request into exactly one category: "
+                "files, weather, admin, demo or general. "
+                "Return only one word. "
+                "Use files if the user wants to list, read, create, write, delete, "
+                "open, show, or summarise local files, folders, documents, notes, "
+                "or workspace content. "
+                "Use weather if the user asks about weather, forecast, temperature, "
+                "rain, alerts, or location weather. "
+                "Use admin if the user asks about application users, database users, user roles, "
+                "user count, admin status, or system user management. "
+                "Use demo if the user asks for a security demo, post-call demo, "
+                "fake harmful API, fake secret API, fake desktop API, or suspicious API test. "
+                "Use general if no tool is needed."
+            ),
+        },
+        {
+            "role": "user",
+            "content": user_message,
+        },
+    ]
+
+    result = call_llm(
+        messages=messages,
+        available_tools=[],
+        backend=backend,
+        max_tokens=20,
+    )
+
+    category = (result.choices[0].message.content or "").strip().lower()
+
+    if category not in {"files", "weather", "general", "admin", "demo"}:
+        return "general"
+
+    return category
+
+def get_content_block_value(block, key: str):
+    if isinstance(block, dict):
+        return block.get(key)
+
+    return getattr(block, key, None)
+
+
+def extract_content_block_text(block) -> str | None:
+    block_text = get_content_block_value(block, "text")
+
+    if block_text is not None:
+        return str(block_text)
+
+    block_type = get_content_block_value(block, "type")
+    mime_type = (
+        get_content_block_value(block, "mimeType")
+        or get_content_block_value(block, "mime_type")
+        or ""
+    )
+
+    if block_type in {"image", "image_url"} or str(mime_type).startswith("image/"):
+        return "[image tool output omitted by post-call security]"
+
+    if block_type:
+        return f"[{block_type} tool output omitted by post-call security]"
+
+    return None
+
+
 def extract_tool_text(tool_result) -> str:
+    """
+    Convert an MCP tool result into plain text.
+
+    MCP tools may return results in different formats:
+    - a normal string
+    - an object with a .content field
+    - an object with a .text field
+    - a list of text blocks inside .content
+
+    This function makes sure the rest of the program always receives a string.
+    """
+    # If the tool already returned plain text, return it directly.
     if isinstance(tool_result, str):
         return tool_result
-
+    # Try to get the "content" field from the tool result.
+    # getattr is used so it will not crash if "content" does not exist.
     content = getattr(tool_result, "content", None)
+    # If the result has content, process it.
     if content is not None:
+        # If content is already a string, return it directly.
         if isinstance(content, str):
             return content
+        # If content is a list, extract text from text blocks and safely
+        # represent non-text blocks instead of stringifying raw payloads.
         if isinstance(content, list):
-            return "\n".join(getattr(item, "text", str(item)) for item in content)
-        return str(content)
+            extracted_blocks = []
+            for item in content:
+                extracted_text = extract_content_block_text(item)
+                if extracted_text is not None:
+                    extracted_blocks.append(extracted_text)
+                else:
+                    extracted_blocks.append(
+                        "[non-text tool output omitted by post-call security]"
+                    )
 
-    return getattr(tool_result, "text", str(tool_result))
+            return "\n".join(extracted_blocks)
+
+        extracted_text = extract_content_block_text(content)
+        if extracted_text is not None:
+            return extracted_text
+
+        return "[non-text tool output omitted by post-call security]"
+
+    # If there is no "content" field, try to get a "text" field.
+    text = getattr(tool_result, "text", None)
+    if text is not None:
+        return str(text)
+
+    return "[non-text tool result omitted by post-call security]"
 
 
+def post_call_decision(response_check) -> str:
+    if response_check.blocked:
+        return "blocked"
 
-# async def run_agent(user_message: str, user_id: str) -> str:
-#     #connect to the MCP server at MCP_URL
-#     #send the user identity in the header
-#     transport = StreamableHttpTransport(
-#         url=MCP_URL,
-#         headers={
-#             "X-User-Id": user_id,
-#         },
-#     )
-def choose_server(user_message: str) -> tuple[str, str, set[str]]:
-    text = user_message.lower()
+    if response_check.modified:
+        return "modified"
 
-    if "file" in text or "read" in text or ".txt" in text or ".md" in text:
-        return FILE_MCP_URL, "file_style", {"list_files", "read_file","create_file","delete_file"}
+    return "allowed"
 
-    return WEATHER_MCP_URL, "bing_weather_style", {
-        "get_alerts",
-        "get_forecast",
-        "get_saved_weather_preferences",
+
+async def write_post_call_audit(
+    *,
+    emit,
+    user: dict,
+    tool_name: str,
+    tool_args: dict,
+    status: str,
+    duration_ms: int,
+    output_chars: int = 0,
+    decision: str = "error",
+    blocked: bool = False,
+    modified: bool = False,
+    reason: str = "",
+    error: str | None = None,
+) -> None:
+    try:
+        log_post_call_event(
+            {
+                "tool_name": tool_name,
+                "tool_args": tool_args,
+                "user_id": user.get("user_id"),
+                "github_login": user.get("login"),
+                "role": user.get("role", "user"),
+                "status": status,
+                "duration_ms": duration_ms,
+                "output_chars": output_chars,
+                "decision": decision,
+                "blocked": blocked,
+                "modified": modified,
+                "reason": reason,
+                "error": error,
+            }
+        )
+    except Exception as audit_error:
+        await emit_log(emit, f"Post-call audit logging failed: {audit_error}")
+    else:
+        await emit_log(emit, f"Post-call audit logged: {decision}")
+
+
+async def call_mcp_tool_with_postcheck(
+    *,
+    mcp_client,
+    tool_name: str,
+    tool_args: dict,
+    user: dict,
+    emit,
+) -> str:
+    start_time = time.perf_counter()
+
+    try:
+        tool_result = await mcp_client.call_tool(tool_name, tool_args)
+    except Exception as exc:
+        duration_ms = int((time.perf_counter() - start_time) * 1000)
+        await write_post_call_audit(
+            emit=emit,
+            user=user,
+            tool_name=tool_name,
+            tool_args=tool_args,
+            status="error",
+            duration_ms=duration_ms,
+            decision="error",
+            reason="tool call failed",
+            error=str(exc),
+        )
+        raise
+
+    duration_ms = int((time.perf_counter() - start_time) * 1000)
+    await emit_log(emit, f"MCP tool finished: {tool_name}")
+
+    tool_text = extract_tool_text(tool_result)
+    await emit_log(emit, "Tool result extracted.")
+
+    response_check = check_response_details(
+        tool_text,
+        source=f"Tool output from {tool_name}"
+    )
+    decision = post_call_decision(response_check)
+
+    if response_check.blocked or response_check.modified:
+        await emit_log(
+            emit,
+            f"Tool output blocked or modified by response check: {tool_name}"
+        )
+
+    await write_post_call_audit(
+        emit=emit,
+        user=user,
+        tool_name=tool_name,
+        tool_args=tool_args,
+        status="success",
+        duration_ms=duration_ms,
+        output_chars=len(tool_text),
+        decision=decision,
+        blocked=response_check.blocked,
+        modified=response_check.modified,
+        reason=response_check.reason,
+    )
+
+    return response_check.text
+
+
+def choose_context(user_message: str, backend: str = "openrouter") -> tuple[str, set[str]]:
+    category = classify_context_with_ai(user_message, backend=backend)
+
+    if category not in TOOL_POLICIES:
+        category = "general"
+    #for now, file or weather
+    policy = TOOL_POLICIES[category]
+
+    return policy["prompt"], policy["allowed_tools"]
+
+def filter_tools_by_user_role(allowed_tools: set[str], user: dict) -> set[str]:
+
+    role = user.get("role", "user")
+
+    admin_only_tools = {
+        "admin_list_users",
     }
 
-async def run_agent(user_message: str, user_id: str) -> str:
-    mcp_url, prompt_name, allowed_tools = choose_server(user_message)
+    if role == "admin":
+        return allowed_tools
 
+    return allowed_tools - admin_only_tools
+
+def call_llm(messages, available_tools, backend="openrouter", max_tokens=500):
+    backend = backend.lower()
+
+    if backend == "openrouter":
+        client = openrouter_client
+        model = OPENROUTER_MODEL
+
+    elif backend == "ollama":
+        client = ollama_client
+        model = OLLAMA_MODEL
+
+    else:
+        raise ValueError(
+            f"Invalid backend '{backend}'. Use 'openrouter' or 'ollama'."
+        )
+
+    request_args = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+    }
+
+    if available_tools:
+        request_args["tools"] = available_tools
+
+    result = client.chat.completions.create(**request_args)
+
+    choice = result.choices[0]
+    msg = choice.message
+
+    print("\n===== LLM DEBUG START =====")
+    print("BACKEND:", backend)
+    print("MODEL:", model)
+    print("MAX TOKENS:", max_tokens)
+    print("AVAILABLE TOOLS:", [t["function"]["name"] for t in available_tools])
+    print("FINISH REASON:", getattr(choice, "finish_reason", None))
+    print("CONTENT REPR:", repr(msg.content or ""))
+    print("CONTENT LENGTH:", len(msg.content or ""))
+    print("TOOL CALLS:", repr(msg.tool_calls))
+    print("USAGE:", getattr(result, "usage", None))
+    print("===== LLM DEBUG END =====\n")
+
+    return result
+
+
+def create_internal_mcp_jwt(user: dict) -> str:
+    """
+    Create a short-lived JWT for backend-to-MCP communication.
+    This token is only used between mcp_host.py and the MCP server.
+    It should never be sent to the browser or the LLM.
+    """
+    now = int(time.time())
+
+    payload = {
+        # Who created this token
+        "iss": "fastapi-web",
+
+        # Who this token is intended for
+        "aud": "mcp-server",
+
+        # Internal service name
+        "sub": "mcp-host",
+
+        # User context for logging/auditing
+        "user_id": str(user.get("user_id")),
+        "github_login": user.get("login"),
+        "role": user.get("role", "user"),
+
+        # Token timing only valid for 60s
+        "iat": now,
+        "exp": now + 60,
+    }
+
+    return jwt.encode(payload, INTERNAL_JWT_SECRET, algorithm="HS256")
+
+
+async def emit_log(emit, message: str):
+    if emit:
+        await emit(message)
+        await asyncio.sleep(0.2)
+
+async def run_agent(
+    user_message: str,
+    user: dict,
+    backend: str = "openrouter",
+    emit=None,
+    approved_risky_actions: list[str] | None = None,
+    image_bytes: bytes | None = None,
+    image_mime_type: str | None = None,
+) -> str:
+    """
+    user comes from FastAPI session after GitHub OAuth login.
+    """
+    await emit_log(emit, "Agent started.")
+    if approved_risky_actions is None:
+        approved_risky_actions = []
+    #try to get username, if not found, use "unknown_user" as default. 
+    github_login = user.get("login", "unknown_user")
+    #try to get user role, if not found, use "user" as default.
+    role = user.get("role", "user")
+
+    await emit_log(emit, f"Authenticated user loaded: {github_login}")
+    await emit_log(emit, f"User role loaded: {role}")
+
+    await emit_log(emit, "Classifying user request into policy category.")
+    prompt_name, allowed_tools = choose_context(user_message, backend=backend)
+
+    await emit_log(emit, f"Selected MCP prompt: {prompt_name}")
+    await emit_log(emit, f"Tools allowed by selected policy: {sorted(list(allowed_tools))}")
+    if prompt_name == "files_file_style":
+        await emit_log(emit, "Running file request sanitisation check.")
+        PreCheckMiddleware.reject_unsafe_text(user_message)
+        await emit_log(emit, "File request sanitisation passed.")
+    await emit_log(emit, "Applying role-based tool filtering.")
+    allowed_tools = filter_tools_by_user_role(allowed_tools, user)
+
+    await emit_log(emit, f"Tools allowed after role check: {sorted(list(allowed_tools))}")
+
+    await emit_log(emit, "Creating internal JWT for FastAPI-to-MCP communication.")
+    internal_jwt = create_internal_mcp_jwt(user)
+
+    await emit_log(emit, "Creating MCP HTTP transport with internal authorization token.")
     transport = StreamableHttpTransport(
-        url=mcp_url,
+        MCP_URL,
         headers={
-            "X-User-Id": user_id,
+            "Authorization": f"Bearer {internal_jwt}",
         },
     )
-    #Open the MCP clint cconnection
-    async with Client(transport) as mcp_client:
-        # Now the backendd can actuallyy talk to the MCP server
+
+    mcp_client_cm = Client(transport)
+
+    await emit_log(emit, "Connecting to MCP server.")
+
+    async with mcp_client_cm as mcp_client:
+        await emit_log(emit, "MCP connection established.")
+
         # 1. Get prompt from MCP server
+        await emit_log(emit, f"Loading MCP prompt: {prompt_name}")
         prompt_result = await mcp_client.get_prompt(prompt_name)
-        #build the initial messages list
+        await emit_log(emit, "MCP prompt loaded.")
+
+        # 2. Build messages
+        await emit_log(emit, "Building messages for the model.")
         messages = []
+
         for m in prompt_result.messages:
             text = getattr(m.content, "text", None)
             if text:
                 messages.append({"role": m.role, "content": text})
-            # After this, the messages might look like this
-            #             [
-            #     {
-            #         "role": "system",
-            #         "content": "When presenting any result from the weather server..."
-            #     }
-            # ]
-        # 2. Add user message
-        messages.append({"role": "user", "content": user_message})
-            #After this, the mesage become something like this 
-            #         [
-            #     {
-            #         "role": "system",
-            #         "content": "When presenting any result from the weather server..."
-            #     },
-            #     {
-            #         "role": "user",
-            #         "content": "what is my saved weather preference?"
-            #     }
-            # ]
 
-     # 3. Get available tools from MCP server
+        user_text = (
+            f"Authenticated GitHub user: {github_login}\n"
+            f"User role: {role}\n\n"
+            f"User request: {user_message}"
+        )
+        # If the user uploaded an image, convert it to a data URL and include it in the message content.
+        # Otherwise, if it is a normal file upload or no upload, just send the text content as before.
+        if image_bytes is not None and image_mime_type is not None:
+            await emit_log(emit, "Image received. Adding image to model message.")
+
+            image_data_url = image_to_data_url(image_bytes, image_mime_type)
+
+            messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": user_text,
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image_data_url,
+                            },
+                        },
+                    ],
+                }
+            )
+        else:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": user_text,
+                }
+            )
+
+        await emit_log(emit, "Messages prepared.")
+
+        # 3. Get only allowed tools
+        await emit_log(emit, "Requesting available tools from MCP server.")
         tools_result = await mcp_client.list_tools()
+        await emit_log(emit, f"MCP server returned {len(tools_result)} tools.")
 
         available_tools = []
+
         for tool in tools_result:
             if tool.name in allowed_tools:
                 available_tools.append(
@@ -104,30 +630,35 @@ async def run_agent(user_message: str, user_id: str) -> str:
                         "function": {
                             "name": tool.name,
                             "description": tool.description or "",
-                            "parameters": tool.inputSchema,#this will allow LLM to understand what parameters the tool will need and pay attention to the input from the user
+                            "parameters": tool.inputSchema,
                         },
                     }
                 )
 
+        available_tool_names = [t["function"]["name"] for t in available_tools]
+        await emit_log(emit, f"Tools exposed to model: {available_tool_names}")
+
         # 4. First LLM call
-        #Model will be able to see the prompt, the user question and the list of available tools
-        first = llm_client.chat.completions.create(
-            model="anthropic/claude-sonnet-4.5",
+        await emit_log(emit, f"Calling LLM backend: {backend}")
+        first = call_llm(
             messages=messages,
-            tools=available_tools,
-            max_tokens=300,
-
+            available_tools=available_tools,
+            backend=backend,
+            max_tokens=1000,
         )
-        #Now the backend check what the model said and there will be two possibility
-        msg = first.choices[0].message
+        await emit_log(emit, "First LLM response received.")
 
+        msg = first.choices[0].message
         final_parts = []
-        #the msg.content contains the answer, no tool calls
+
         if msg.content:
+            await emit_log(emit, "LLM returned text content.")
             final_parts.append(msg.content)
 
-        # 5. If tool calls exist, execute them
+        # 5. Execute tool calls if any
         if msg.tool_calls:
+            await emit_log(emit, f"LLM requested {len(msg.tool_calls)} tool call(s).")
+
             messages.append(
                 {
                     "role": "assistant",
@@ -145,41 +676,119 @@ async def run_agent(user_message: str, user_id: str) -> str:
                     ],
                 }
             )
-            #This could be important to add in the report, even if the model ask for a weird tool, only these three are allowed
+
             for tc in msg.tool_calls:
-            # get tool name
                 tool_name = tc.function.name
 
-                # BLOCK not allowed tools
-                if tool_name not in allowed_tools:
-                    raise ValueError(f"Tool not allowed: {tool_name}")
+                await emit_log(emit, f"Tool requested by model: {tool_name}")
+                await emit_log(emit, "Checking tool against allowlist.")
 
-                # parse the tool arguments
+                # Allowlist check
+                if tool_name not in allowed_tools:
+                    await emit_log(emit, f"Tool blocked: {tool_name}")
+                    raise ValueError(f"Tool not allowed for this user: {tool_name}")
+
+                await emit_log(emit, f"Tool allowed: {tool_name}")
+
+                # Parse arguments
+                await emit_log(emit, "Parsing tool arguments.")
                 tool_args = json.loads(tc.function.arguments or "{}")
 
-                # validate input
-                if tool_name == "get_alerts":
+                await emit_log(emit, f"Raw tool arguments: {tool_args}")
+
+                # Input validation
+                await emit_log(emit, "Running pre-tool input validation.")
+
+                if tool_name == "weather_get_alerts":
                     state = tool_args.get("state", "")
-                    if not isinstance(state, str) or len(state) != 2:
+                    if not isinstance(state, str) or len(state.strip()) != 2:
+                        await emit_log(emit, "Validation failed: invalid state code.")
                         raise ValueError("Invalid state code.")
 
-                if tool_name == "get_forecast":
+                if tool_name == "weather_get_forecast":
                     lat = tool_args.get("latitude")
                     lon = tool_args.get("longitude")
-                    if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+
+                    try:
+                        lat = float(lat)
+                        lon = float(lon)
+                    except (TypeError, ValueError):
+                        await emit_log(emit, "Validation failed: invalid coordinates.")
                         raise ValueError("Invalid coordinates.")
 
-                if tool_name == "read_file":
+                    if not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
+                        await emit_log(emit, "Validation failed: coordinates out of range.")
+                        raise ValueError("Coordinates out of range.")
+
+                    tool_args["latitude"] = lat
+                    tool_args["longitude"] = lon
+
+                if tool_name in {
+                    "files_read_file",
+                    "files_create_file",
+                    "files_delete_file",
+                }:
                     filename = tool_args.get("filename", "")
                     if not isinstance(filename, str) or not filename.strip():
+                        await emit_log(emit, "Validation failed: invalid filename.")
                         raise ValueError("Invalid filename.")
+                    PreCheckMiddleware.reject_unsafe_text(filename)
 
-                # call the MCP tool
-                tool_result = await mcp_client.call_tool(tool_name, tool_args)
+                if tool_name == "files_create_file":
+                    content = tool_args.get("content", "")
+                    if not isinstance(content, str):
+                        await emit_log(emit, "Validation failed: invalid file content.")
+                        raise ValueError("Invalid file content.")
+                    PreCheckMiddleware.reject_unsafe_text(content)
 
-                # convert the tool result into plain text
-                tool_text = extract_tool_text(tool_result)
+                if tool_name in {
+                    "files_list_files",
+                    "files_read_file",
+                    "files_create_file",
+                    "files_delete_file",
+                }:
+                    workspace_path = user.get("workspace_path")
 
+                    if not workspace_path:
+                        await emit_log(emit, "Validation failed: missing workspace path.")
+                        raise ValueError("User workspace path was not found in session.")
+
+                    tool_args["workspace_path"] = workspace_path
+                    await emit_log(emit, f"Workspace path injected into tool arguments: /{Path(workspace_path).name}")
+                await emit_log(emit, "Pre-tool validation passed.")
+                #The tool request looks valid, but have not executed it yet
+                # Check whether this tool action is risky and needs user consent
+                risk = assess_tool_risk(tool_name, tool_args)
+                action_key = risk["action_key"]
+                #Do we need consent? or has the user already approved
+                if risk["requires_consent"] and action_key not in approved_risky_actions:
+                    await emit_log(emit, f"Consent required before running tool: {tool_name}")
+
+                    if emit:
+                        await emit({
+                            "type": "consent_required",
+                            "content": risk["description"],
+                            "tool_name": tool_name,
+                            "tool_args": {
+                                k: v for k, v in tool_args.items()
+                                if k != "workspace_path"
+                            },
+                            "action_key": action_key,
+                        })
+
+                    return "Action paused. User consent is required before this tool can run."
+
+                await emit_log(emit, f"Calling MCP tool: {tool_name}")
+
+                tool_text = await call_mcp_tool_with_postcheck(
+                    mcp_client=mcp_client,
+                    tool_name=tool_name,
+                    tool_args=tool_args,
+                    user=user,
+                    emit=emit,
+                )
+
+                await emit_log(emit, "Tool result checked and prepared for model.")
                 messages.append(
                     {
                         "role": "tool",
@@ -187,20 +796,32 @@ async def run_agent(user_message: str, user_id: str) -> str:
                         "content": tool_text,
                     }
                 )
-                #now the model can see for example : the tool result is Los Angeles, CA
-            # 6. Second LLM call with tool results
-            #Now the model will have the tool result
-            #The first model could not answer fully, as the tool had not run yet
-            #things like here is the tooloutput, turn into a final user-facing answer
-            second = llm_client.chat.completions.create(
-                model="anthropic/claude-sonnet-4.5",
-                messages=messages,
-                tools=available_tools,
-                max_tokens=300,
 
+            # 6. Second LLM call with tool outputs
+            await emit_log(emit, "Calling LLM again with tool result.")
+            second = call_llm(
+                messages=messages,
+                available_tools=available_tools,
+                backend=backend,
+                max_tokens=1000,
             )
+            await emit_log(emit, "Second LLM response received.")
 
             if second.choices[0].message.content:
                 final_parts.append(second.choices[0].message.content)
 
-        return "\n".join(part for part in final_parts if part).strip()
+        else:
+            await emit_log(emit, "No tool call requested by the model.")
+
+        final_response = "\n".join(part for part in final_parts if part).strip()
+
+        await emit_log(emit, "Running final response check.")
+        final_check = check_response_details(final_response, source="Final response")
+
+        if final_check.blocked or final_check.modified:
+            await emit_log(emit, "Final response blocked or modified by response check.")
+
+        final_response = final_check.text
+
+        await emit_log(emit, "Final response generated.")
+        return final_response

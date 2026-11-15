@@ -6,6 +6,9 @@
 __pycache__/
 *.pyc
 
+# Generated security logs
+web_server/security/*.log
+
 # Virtual environments
 venv/
 .venv/
