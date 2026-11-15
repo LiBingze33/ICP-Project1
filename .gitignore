@@ -15,3 +15,9 @@ venv/
 
 # macOS
 .DS_Store
+
+# SQLite runtime database
+web_server/database.db
+
+# User private workspaces
+web_server/user_workspaces/
