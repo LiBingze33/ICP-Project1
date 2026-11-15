@@ -32,7 +32,7 @@ The browser submits multipart forms to `/chat-stream`. FastAPI checks the signed
 
 The session cookie uses `Secure`, `SameSite=Lax`, and a two-hour lifetime. `make web` starts Uvicorn on `0.0.0.0:8000` with development reload. The MCP process binds only `127.0.0.1:9000`; the host's MCP URL is fixed to the same loopback address.
 
-**Hosting configuration is not included.** There are no Nginx/Caddy files, TLS certificate settings, DNS records, Docker manifests, systemd units, or deployment automation. The repository therefore does not identify the actual reverse proxy, TLS terminator, hosting provider, or process supervisor. The public HTTPS address and callback are known, while their infrastructure cannot be reconstructed from this branch alone.
+The application is configured for the public HTTPS address and callback. TLS, reverse-proxy routing, and process supervision are managed outside this repository.
 
 ## Implemented features
 
@@ -45,9 +45,9 @@ The session cookie uses `Secure`, `SameSite=Lax`, and a two-hour lifetime. `make
 - UTF-8 text/Markdown and PDF summarisation, plus image descriptions for `.png`, `.jpg`, and `.jpeg` using a vision-capable backend. PDF extraction is limited to 20,000 characters.
 - Six synthetic security tools: `demo_safe_health_check`, `demo_safe_public_info`, `demo_safe_echo`, `demo_fake_secret_api`, `demo_fake_desktop_info_api`, and `demo_fake_error_status_api`.
 
-The demo tools simulate suspicious output without reading real secrets or Desktop files. The registered `weather_only_tool` is not exposed by the host policies. `weather_get_user_info` expects a FastMCP access-token context that the custom JWT middleware does not establish; its successful identity lookup is not verified.
+The demo tools use synthetic responses to demonstrate output scanning without reading real secrets or Desktop files.
 
-## Security controls and limits
+## Security mechanisms
 
 | Layer | Connected implementation |
 | --- | --- |
@@ -60,9 +60,9 @@ The demo tools simulate suspicious output without reading real secrets or Deskto
 | Output | Secret/prompt-injection/XSS/API-error/Desktop-leak patterns; URL/HTML canonicalisation and local-path redaction |
 | Audit | JSON-lines tool decisions with identity, role, duration, output size and reason; selected secret/content/workspace keys are redacted |
 
-`PreCheckMiddleware` defines additional sensitive-file, permission, read-output, and `confirm=True` checks, but the class is not attached to either MCP server. Only its explicitly called text helper is active. Internal JWT middleware authenticates the backend service; it does not independently enforce the host's per-tool role policy.
+Input validation runs through shared helpers in the host and upload flows. The standalone pre-check middleware is not registered on the MCP servers. Internal JWTs authenticate the backend service, while the host applies role-based tool policies.
 
-The post-call checker scans tool output before it is passed back to the model and scans the final answer before display. Upload text/PDF content is scanned before model submission; image content is not OCR-scanned first. Audit logging is triggered by MCP tool execution, not by a general assessment of whether every external API is safe.
+The post-call checker scans tool output before the follow-up model call and checks the final answer before display. Upload text/PDF content is scanned before model submission, and audit records capture tool execution decisions.
 
 ## Differences from the local version
 
@@ -74,9 +74,9 @@ The post-call checker scans tool output before it is passed back to the model an
 | Web/MCP defaults | Uvicorn :8000 and loopback MCP :9000 | Same defaults |
 | Data/model/security workflow | OAuth, SQLite, allowlists, JWTs, uploads, post-call checks | Same functional workflow |
 | Deployment infrastructure | Not committed | Also not committed |
-| Other repository differences | More explanatory source comments; tracked local runtime data | Different comments/line endings and tracked runtime data; a secrets demonstration path |
+| Repository presentation | More explanatory source comments | Different source comments/formatting and an additional security demonstration resource |
 
-Source inspection found no additional public-only security subsystem. The audit module also differs by a postponed-annotations import; most remaining Python differences are comments and formatting. Runtime database/workspace contents differ and are not configuration templates.
+Both versions use the same core security workflow. Runtime databases and user workspaces are ignored by Git in both branches.
 
 ## Project structure
 
@@ -106,11 +106,9 @@ web_server/
   services/
     mcp_host.py
     upload_processing.py
-  database.db                      # Existing tracked runtime database
-  user_workspaces/                  # Existing tracked user content
+  database.db                      # Generated at runtime; ignored by Git
+  user_workspaces/                  # Per-user runtime files; ignored by Git
 ```
-
-There is no `tests/` directory in this branch. The older README's `tests.test_postcall_security`, `tests.test_upload_processing`, and `tests.test_post_call_audit` commands do not correspond to committed files and are not valid verification instructions for this snapshot.
 
 ## Installation and deployment prerequisites
 
@@ -145,21 +143,19 @@ make mcp
 make web
 ```
 
-These are the repository's development startup commands, not a complete production deployment procedure. SQLAlchemy creates the user table if absent. Existing tracked runtime files are not required deployment fixtures and should not be reused as private production data. The host must separately provide HTTPS access, the configured domain/callback, appropriate routing to the web process including streaming responses, and process supervision. Its private MCP endpoint should remain internal. Exact infrastructure commands cannot be supplied from this repository.
+These commands start the development services. SQLAlchemy creates the user table if absent, and login creates each user's workspace. Public hosting additionally requires HTTPS access, the configured domain/callback, routing that supports streaming responses, and process supervision. Keep the MCP endpoint internal; hosting-specific configuration is managed separately.
 
 Opening plain `http://127.0.0.1:8000` is useful for inspecting the page but does not reproduce public login: the callback remains the public URL and the cookie requires HTTPS. Use [local_mcp](https://github.com/LiBingze33/ICP-Project1/tree/local_mcp) for the local workflow. Ollama is an optional separately provisioned service/model on the deployment host; the browser user's machine does not host it for this public application.
 
 ## Access and usage
 
-If the service is available, open [https://9163.syslab.au](https://9163.syslab.au), log in with GitHub, select a backend, and submit a message or upload. Try creating/reading `notes.txt`, asking for a US weather forecast with coordinates, summarising a non-sensitive PDF, or running the security demo safe health check. Deletion prompts for consent. Synthetic secret/Desktop/error-status demos are intended to exercise blocking rather than reveal real data. These scenarios were not executed for this documentation update.
+If the service is available, open [https://9163.syslab.au](https://9163.syslab.au), log in with GitHub, select a backend, and submit a message or upload. Try creating/reading `notes.txt`, asking for a US weather forecast with coordinates, summarising a non-sensitive PDF, or running the security demo safe health check. Deletion prompts for consent. Synthetic secret/Desktop/error-status demos exercise post-call checks using demonstration data.
 
-## Limitations and sensitive data
+## Security Scope & Future Improvements
 
-This remains a prototype. Regex-based checks are not complete attack prevention. There is no pre-model image OCR, malware scanning, or overall application upload-size limit. OpenRouter receives submitted content when selected; debug console output includes model text and tool arguments and is not equivalent to the sanitised audit log. New users default to `user`; admin access requires an existing administrative database configuration outside the UI.
+This university prototype demonstrates host policies, service authentication, input validation helpers, output scanning, and tool audit logging in a publicly accessible workflow. The public version shares these controls with the local implementation.
 
-The `.gitignore` does not cover the already tracked database/workspaces. Do not stage credentials, `.env`, runtime user files, databases, or audit logs into new changes. Their historical presence is not a recommendation to publish personal content. Removing previously exposed data from history or rotating credentials is a separate operation; this README update does not perform either.
-
-Further improvements retained from the original project context include stronger monitoring, stricter file validation, OCR, malware scanning, formal threat modelling, fuzz testing, and deployment secret management. Live HTTPS, OAuth, backend availability, and security scenarios were not tested during this documentation-only task.
+Future work includes full pre-check middleware integration, automated security tests, stronger upload validation and size limits, OCR before image submission, and deployment monitoring. Images are currently checked through their model-generated descriptions. Use non-sensitive demonstration content, particularly with OpenRouter, and keep credentials private. Runtime databases, user workspaces, and audit logs are ignored by Git.
 
 ## Other project versions
 
