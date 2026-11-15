@@ -2,7 +2,7 @@
 
 This university MCP project explores how an AI web application can use local files and online tools while applying explicit security checks. The emphasis is security experimentation: controlling tool selection, arguments, uploaded content, tool results, and final model responses rather than building an unrestricted assistant.
 
-[local_mcp](https://github.com/LiBingze33/ICP-Project1/tree/local_mcp) is the advanced locally hosted version. Its application implementation is also presented on [main](https://github.com/LiBingze33/ICP-Project1/tree/main); `main` excludes the runtime database and committed user workspace files and has a different README. The [original university implementation](https://github.com/LiBingze33/ICP-Project1/tree/terminal_required) remains available separately. The [public version](https://github.com/LiBingze33/ICP-Project1/tree/domain_mcp) targets [https://9163.syslab.au](https://9163.syslab.au).
+[local_mcp](https://github.com/LiBingze33/ICP-Project1/tree/local_mcp) is the advanced locally hosted version. Its application implementation is also presented on [main](https://github.com/LiBingze33/ICP-Project1/tree/main), with a README tailored to the repository homepage. Both branches exclude runtime databases and user workspaces from Git tracking. The [original university implementation](https://github.com/LiBingze33/ICP-Project1/tree/terminal_required) remains available separately. The [public version](https://github.com/LiBingze33/ICP-Project1/tree/domain_mcp) targets [https://9163.syslab.au](https://9163.syslab.au).
 
 ## System architecture
 
@@ -33,12 +33,12 @@ The parent MCP server mounts four child servers within one process. It is a sing
 - GitHub OAuth login/logout, signed sessions, database-backed users, and default `user` roles.
 - File listing, UTF-8 reading, creation, and deletion within user workspace folders. Deletion pauses for the browser's consent workflow.
 - US weather alerts and coordinate-based forecasts through `api.weather.gov`.
-- Admin user listing, exposed by the host only for database users with the `admin` role. There is no role-management UI or automatic admin enrolment.
+- Admin user listing, exposed by the host only for database users with the `admin` role.
 - OpenRouter and Ollama selection in the browser; defaults are `anthropic/claude-sonnet-4.5` and `llama3.2` respectively.
 - Uploads of `.txt`, `.md`, `.pdf`, `.png`, `.jpg`, and `.jpeg`. Text is UTF-8 decoded; PDFs use `pypdf`, with a `PyPDF2` fallback. Extracted PDF text is capped at 20,000 characters. Images require a model with vision support.
 - Security demo tools: `demo_safe_health_check`, `demo_safe_public_info`, `demo_safe_echo`, `demo_fake_secret_api`, `demo_fake_desktop_info_api`, and `demo_fake_error_status_api`. Harmful-looking responses are synthetic demonstrations, not reads of real credentials or Desktop files.
 
-## Security architecture and boundaries
+## Security architecture
 
 | Layer | Implemented control and purpose |
 | --- | --- |
@@ -51,9 +51,7 @@ The parent MCP server mounts four child servers within one process. It is a sing
 | Post-call checks | URL/HTML decoding, whitespace normalisation, compact structural XSS checks, secret/prompt-injection/API-status/Desktop-leak patterns, and local-path redaction |
 | Audit records | JSON lines in `security/post_call_audit.log`, including time, identity, role, tool, status, duration, output size, decision, and reason; selected sensitive field names are redacted |
 
-The full `PreCheckMiddleware` class also contains sensitive-filename, operation-permission, read-result, and `confirm=True` rules. It is **not registered** on the parent or file server in this branch. Its presence must not be confused with active middleware enforcement; the host's helper checks and consent workflow are the connected controls.
-
-Internal JWT verification authenticates the calling service; it does not itself enforce per-tool roles. The host implements role filtering. The registered `weather_only_tool` is outside the host allowlists. `weather_get_user_info` expects FastMCP access-token claims, whereas the custom JWT middleware only verifies a token and does not populate that context; this tool should not be described as a verified working identity endpoint.
+Input validation runs through shared helpers in the host and upload flows. The standalone pre-check middleware is not registered on the MCP servers. Internal JWTs authenticate the backend service; the host enforces role-based tool policies and delete consent.
 
 ## Project structure
 
@@ -82,15 +80,15 @@ web_server/
     upload_processing.py           # Decoding, PDF extraction, upload prompts
   security/post_call_audit.py
   pages/home.html                  # Login, model selection, upload and chat UI
-  database.db                      # Existing tracked runtime data
-  user_workspaces/                  # Existing tracked user files; not sample config
+  database.db                      # Generated at runtime; ignored by Git
+  user_workspaces/                  # Per-user runtime files; ignored by Git
 ```
 
-`security/post_call_audit.log` is generated at runtime and ignored. No `tests/` directory, dependency lockfile, reverse-proxy configuration, container manifest, or service definition is included in this branch.
+`security/post_call_audit.log` is generated at runtime and ignored. Local startup uses the Makefile; deployment infrastructure is managed separately.
 
 ## Installation and local setup
 
-Prerequisites: Python 3.10+ for the source syntax, pip/venv, Make, GitHub OAuth application credentials, an OpenRouter API key, and network access to GitHub's OAuth/API endpoints and the selected external services. The branch does not pin Python or dependency versions. Commands below describe the existing entry points, not a newly tested installation.
+Prerequisites: Python 3.10+, pip/venv, Make, GitHub OAuth application credentials, an OpenRouter API key, and network access to GitHub's OAuth/API endpoints and the selected external services. The branch does not pin Python or dependency versions.
 
 ```bash
 git clone --branch local_mcp https://github.com/LiBingze33/ICP-Project1.git
@@ -112,7 +110,7 @@ Set the following variables securely in the environment or an untracked `web_ser
 | `OLLAMA_BASE_URL` | Optional; defaults to `http://127.0.0.1:11434/v1` |
 | `OLLAMA_MODEL` | Optional; defaults to `llama3.2` |
 
-`make session-key` prints a newly generated random value; generate and store separate private session/JWT keys. SQLAlchemy creates the user table on web startup if absent. Existing tracked database/workspace files are historical runtime data, not required initialisation fixtures. Do not reuse their user records as your own configuration.
+`make session-key` prints a newly generated random value; generate and store separate private session/JWT keys. SQLAlchemy creates the user table on web startup if absent, and login creates each user's workspace. Runtime databases and user files are ignored by Git.
 
 Start MCP in one terminal:
 
@@ -142,20 +140,16 @@ Open your configured local HTTPS URL, log in with GitHub, choose a model backend
 - Ask to read `../../secret.txt` to demonstrate path rejection, or request an XSS-like file payload to exercise input detection.
 - Ask “Run the security demo safe health check” for a benign tool response; the fake secret, Desktop, and error-status tools demonstrate post-call blocking.
 
-These are manual demonstration scenarios, not reported passing tests. Model classification and external model availability affect execution. Only use synthetic test content and non-sensitive uploads.
+Use synthetic test content and non-sensitive uploads for these manual demonstrations.
 
-## Limitations and data handling
+## Security Scope & Future Improvements
 
-This is an educational security prototype, not production-ready security software. Pattern checks can miss attacks or reject legitimate text. Images reach the selected model before their descriptions are scanned; there is no pre-model OCR or malware scanner. Uploaded files are read into memory and the code does not impose an overall upload-size limit. OpenRouter receives submitted prompts, supported image content, and allowed tool output when selected. Ollama avoids that model-service transfer but GitHub OAuth and weather still use external services.
+This educational prototype demonstrates layered checks around MCP tool use. Implemented controls include host allowlists, role filtering, internal JWTs, input validation helpers, output scanning, and tool audit records.
 
-Audit redaction is based on selected dictionary keys, not a guarantee that arbitrary strings are secret-free. Development debug output includes model content and tool arguments; do not treat console logs as sanitised audit logs. JWT service authentication and host allowlists do not constitute complete independent server-side authorisation.
-
-The current `.gitignore` covers `.env`, environments, bytecode, and security logs, but does **not** exclude the tracked database or user workspaces. Avoid broad staging of runtime data. Keep credentials, databases, workspace uploads, and logs private. Existing tracked data is retained on this branch under the documentation-only scope; it is excluded from the new `main` tree, but historical commits still contain it.
-
-Further work discussed in the original documentation includes OCR before image submission, stricter file validation, malware scanning, formal threat modelling, fuzzing, monitoring, and deployment secret management. No automated test files are included in this branch, and no runtime validation was performed for this documentation update.
+Future work includes full pre-check middleware integration, automated security tests, stronger upload validation and size limits, OCR before image submission, and improved monitoring. Images are currently checked through their model-generated descriptions. OpenRouter receives submitted content when selected; use non-sensitive demonstration data and keep credentials in the environment or a private `.env`.
 
 ## Other versions
 
 - [main](https://github.com/LiBingze33/ICP-Project1/tree/main): portfolio presentation of this application, with runtime data excluded.
 - [terminal_required](https://github.com/LiBingze33/ICP-Project1/tree/terminal_required): original terminal client and basic web demo, without this authentication/security workflow.
-- [domain_mcp](https://github.com/LiBingze33/ICP-Project1/tree/domain_mcp): largely the same advanced application, with a fixed public OAuth callback. Its hosting/TLS configuration is not checked in. Public service availability is not verified here.
+- [domain_mcp](https://github.com/LiBingze33/ICP-Project1/tree/domain_mcp): the public version with a fixed HTTPS OAuth callback. Hosting/TLS configuration is managed separately; current service availability has not been verified.
