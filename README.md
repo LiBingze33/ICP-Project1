@@ -1,406 +1,168 @@
-# Secure AI MCP Web Server
+# Secure AI MCP Web Server — Public Domain Version
 
-This project is a security-focused prototype for exploring how an AI web
-application can safely use external tools, online APIs, and Model Context
-Protocol (MCP) servers. The system is designed to keep the language model useful
-while placing security checks around tool selection, tool arguments, uploaded
-content, tool output, and final model responses.
+[domain_mcp](https://github.com/LiBingze33/ICP-Project1/tree/domain_mcp) is the publicly deployed version of this university security-focused MCP prototype. The supplied deployment address is **[https://9163.syslab.au](https://9163.syslab.au)**. This documentation describes the committed implementation; it does not establish that the service is currently online.
 
-The prototype demonstrates layered controls for:
+The project demonstrates controlled interaction between an AI model, local files, external weather APIs, and MCP tools. Authentication, tool policies, pre-call validation, post-call scanning, and audit records provide material for security demonstrations and the university project report.
 
-- authentication and role-aware tool access
-- MCP tool allowlisting
-- private user workspaces
-- pre-call validation before tools run
-- post-call output scanning after tools or APIs return data
-- audit logging for tool execution decisions
-- uploaded file and image summarisation with security checks
+## Application architecture
 
-## Project Purpose
+```mermaid
+flowchart TD
+    Browser[Browser at 9163.syslab.au] -->|HTTPS: hosting details not committed| Web[FastAPI web application]
+    Web <-->|OAuth code exchange and user profile| GitHub[GitHub OAuth/API]
+    Web --> DB[(SQLite users)]
+    Web --> Upload[Text/PDF extraction and upload scanning]
+    Web --> Host[MCP host: policy, role and argument checks]
+    Host <--> Model[OpenRouter or server-local Ollama]
+    Host -->|Internal JWT over loopback HTTP| MCP[Parent MCP: 127.0.0.1:9000/mcp]
+    MCP --> Files[files tools: per-user workspace]
+    MCP --> Weather[weather tools: National Weather Service]
+    MCP --> Admin[admin user-list tool]
+    MCP --> Demo[demo security tools]
+    Host --> Check[Tool-result scan, audit record, final-answer scan]
+    Host --> Web
+    Web -->|SSE progress and final response| Browser
+```
 
-The project is security-first rather than product-first. It supports a capstone
-report by demonstrating how LLM-powered applications can interact with local
-files, online APIs, and MCP tools without giving the model unrestricted access to
-system resources.
+The browser submits multipart forms to `/chat-stream`. FastAPI checks the signed session and reloads the user's database record before constructing trusted identity, role, and workspace context. The host selects a request category and MCP prompt, exposes only its allowed tools, executes validated calls, scans tool results, and checks the final model answer. The MCP children are mounted namespaces in one parent server process, not independent network services.
 
-The main security idea is that every useful action passes through controlled
-layers:
+## Public deployment and authentication
+
+`main.py` explicitly sets the OAuth redirect URI to `https://9163.syslab.au/auth/callback`. `/auth/callback` exchanges the GitHub authorisation code, retrieves the GitHub profile, creates or loads the SQLite user, establishes their workspace, and stores identity in the signed session. New users receive role `user`; there is no admin registration or role-editing interface. Logout clears the application session, not the user's GitHub login.
+
+The session cookie uses `Secure`, `SameSite=Lax`, and a two-hour lifetime. `make web` starts Uvicorn on `0.0.0.0:8000` with development reload. The MCP process binds only `127.0.0.1:9000`; the host's MCP URL is fixed to the same loopback address.
+
+**Hosting configuration is not included.** There are no Nginx/Caddy files, TLS certificate settings, DNS records, Docker manifests, systemd units, or deployment automation. The repository therefore does not identify the actual reverse proxy, TLS terminator, hosting provider, or process supervisor. The public HTTPS address and callback are known, while their infrastructure cannot be reconstructed from this branch alone.
+
+## Implemented features
+
+- GitHub OAuth login, signed sessions, SQLAlchemy/SQLite users, and per-user workspace folders.
+- Category-specific tool allowlists for files, weather, admin, demo, and general conversation. General conversation has no tools.
+- File list/read/create/delete operations, with host-supplied workspace arguments and a browser consent/resubmission flow for deletion.
+- US weather alerts and location forecasts from `api.weather.gov`.
+- Admin user listing filtered by the host according to the database role.
+- Browser selection of OpenRouter or Ollama; model progress logs and final replies are delivered with SSE, not individual streamed model tokens.
+- UTF-8 text/Markdown and PDF summarisation, plus image descriptions for `.png`, `.jpg`, and `.jpeg` using a vision-capable backend. PDF extraction is limited to 20,000 characters.
+- Six synthetic security tools: `demo_safe_health_check`, `demo_safe_public_info`, `demo_safe_echo`, `demo_fake_secret_api`, `demo_fake_desktop_info_api`, and `demo_fake_error_status_api`.
+
+The demo tools simulate suspicious output without reading real secrets or Desktop files. The registered `weather_only_tool` is not exposed by the host policies. `weather_get_user_info` expects a FastMCP access-token context that the custom JWT middleware does not establish; its successful identity lookup is not verified.
+
+## Security controls and limits
+
+| Layer | Connected implementation |
+| --- | --- |
+| User context | Chat requires a session and a database user; role/workspace are reloaded from SQLite |
+| Tool selection | Host category allowlists, admin filtering, argument validation, and trusted workspace injection |
+| Consent | A delete action key identifies the filename; the browser asks before resubmitting an approved operation |
+| Service authentication | HS256 internal JWT, 60-second expiry, issuer `fastapi-web`, audience `mcp-server` |
+| MCP limits | Five requests/second, burst ten, response limit 100,000 bytes |
+| Input | Active XSS/SQL-like pattern checks in host/upload paths; file tools reject separators and parent-traversal filename forms |
+| Output | Secret/prompt-injection/XSS/API-error/Desktop-leak patterns; URL/HTML canonicalisation and local-path redaction |
+| Audit | JSON-lines tool decisions with identity, role, duration, output size and reason; selected secret/content/workspace keys are redacted |
+
+`PreCheckMiddleware` defines additional sensitive-file, permission, read-output, and `confirm=True` checks, but the class is not attached to either MCP server. Only its explicitly called text helper is active. Internal JWT middleware authenticates the backend service; it does not independently enforce the host's per-tool role policy.
+
+The post-call checker scans tool output before it is passed back to the model and scans the final answer before display. Upload text/PDF content is scanned before model submission; image content is not OCR-scanned first. Audit logging is triggered by MCP tool execution, not by a general assessment of whether every external API is safe.
+
+## Differences from the local version
+
+| Topic | `local_mcp` | `domain_mcp` |
+| --- | --- | --- |
+| Intended access | Developer-hosted browser session | Public HTTPS address above |
+| OAuth callback | Derived from incoming request URL | Fixed to the public domain callback |
+| Secure session cookie | Enabled | Enabled; not an additional public-only feature |
+| Web/MCP defaults | Uvicorn :8000 and loopback MCP :9000 | Same defaults |
+| Data/model/security workflow | OAuth, SQLite, allowlists, JWTs, uploads, post-call checks | Same functional workflow |
+| Deployment infrastructure | Not committed | Also not committed |
+| Other repository differences | More explanatory source comments; tracked local runtime data | Different comments/line endings and tracked runtime data; a secrets demonstration path |
+
+Source inspection found no additional public-only security subsystem. The audit module also differs by a postponed-annotations import; most remaining Python differences are comments and formatting. Runtime database/workspace contents differ and are not configuration templates.
+
+## Project structure
 
 ```text
-User request
--> FastAPI web app
--> authentication and database user lookup
--> MCP host policy selection
--> tool allowlist and argument validation
--> MCP tool or API call
--> post-call response check
--> audit log
--> final response check
--> browser response
-```
-
-## Current Features
-
-### Web App and Authentication
-
-- FastAPI web chat interface
-- GitHub OAuth login
-- Local user records stored with SQLAlchemy
-- Per-user private workspace folders
-- Trusted user context loaded from the database, not directly from the session
-
-### MCP Tool Integration
-
-- Parent MCP server mounted at `http://127.0.0.1:9000/mcp`
-- Weather MCP tools for online weather API demonstrations
-- Local file MCP tools for listing, reading, creating, and deleting files
-- Admin MCP tool example for role-based access
-- Security demo MCP tools for safe post-call testing
-- Tool allowlisting in `services/mcp_host.py`
-
-### Pre-Call Security
-
-Pre-call checks happen before a tool is executed or before uploaded text is sent
-to the model.
-
-Controls include:
-
-- filename validation
-- path traversal blocking
-- workspace restriction
-- sensitive filename blocking, such as `.env` and private key files
-- XSS input detection
-- SQL injection input detection
-- delete confirmation for risky file operations
-- file upload extension allowlisting
-
-### Post-Call Security
-
-Post-call checks happen after a tool, API, uploaded-content extraction, or model
-response has produced output.
-
-The response checker can:
-
-- block secret-like content, API keys, bearer tokens, JWTs, and private keys
-- block prompt injection text
-- block suspicious API status output, such as `403`, `429`, or `500`
-- block local Desktop information leakage
-- redact local machine paths
-- block XSS-like content in tool output or final model summaries
-
-Post-call checking is implemented in:
-
-```text
-web_server/middleware/response_check.py
-```
-
-MCP tool calls are wrapped and checked in:
-
-```text
-web_server/services/mcp_host.py
-```
-
-### Canonicalisation-Based XSS Detection
-
-The XSS detector does not only match one hard-coded payload. It first
-canonicalises output by:
-
-- decoding URL encoding, such as `%0a` and `%09`
-- decoding HTML entities, such as `&#x0A;`
-- normalising whitespace
-- compacting text by removing separators and punctuation
-- checking for dangerous structure
-
-This helps detect variants such as:
-
-```text
-j%0aavas%09cript
-java&#x0A;script
-j a v a s c r i p t
-<img src=x onerror=alert(1)>
-```
-
-The detector looks for combinations such as:
-
-- HTML attributes like `href`, `src`, `action`, or `formaction`
-- dangerous schemes like `javascript`, `vbscript`, or `data:text/html`
-- execution markers like `alert`, `confirm`, `prompt`, `eval`, or `fetch`
-- event handlers like `onerror`, `onclick`, or `onload`
-
-### Uploaded File and Image Summarisation
-
-The web app supports uploaded content for summarisation or description:
-
-- `.txt`
-- `.md`
-- `.pdf`
-- `.png`
-- `.jpg`
-- `.jpeg`
-
-Text and Markdown files are decoded as UTF-8.
-
-PDF files are extracted with `pypdf` or `PyPDF2` if available. Extracted PDF text
-is scanned before it is sent to the model.
-
-Images are sent to a vision-capable model for description. The final image
-description is scanned by the post-call checker before it is shown to the user.
-
-Important limitation: image text is currently checked after the model describes
-the image. A stronger future layer would add OCR before the image is sent to the
-model.
-
-### Security Demo MCP Tools
-
-The demo MCP server provides safe test tools that simulate suspicious API
-responses without reading real secrets or real Desktop files.
-
-Demo tools include:
-
-- `demo_safe_health_check`
-- `demo_safe_public_info`
-- `demo_safe_echo`
-- `demo_fake_secret_api`
-- `demo_fake_desktop_info_api`
-- `demo_fake_error_status_api`
-
-These tools are useful for showing post-call blocking and audit logging in a
-controlled way.
-
-### Post-Call Audit Logging
-
-Tool execution decisions are logged to:
-
-```text
-web_server/security/post_call_audit.log
-```
-
-Audit records include:
-
-- timestamp
-- tool name
-- user identity
-- role
-- status
-- duration
-- output size
-- decision: `allowed`, `modified`, `blocked`, or `error`
-- block reason
-
-Sensitive audit fields such as tokens, secrets, content, and workspace paths are
-redacted before writing the log.
-
-## Requirements
-
-- Python 3.10 or above
-- pip
-- virtual environment support
-- OpenRouter API key
-- GitHub OAuth credentials
-- `pypdf` for PDF summarisation
-
-## Installation
-
-From the `web_server` directory:
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
-make install
-```
-
-Create or update `.env`:
-
-```env
-GITHUB_CLIENT_ID=your_github_client_id
-GITHUB_CLIENT_SECRET=your_github_client_secret
-OPENROUTER_API_KEY=your_openrouter_api_key
-SESSION_SECRET_KEY=your_session_secret
-INTERNAL_JWT_SECRET=your_internal_jwt_secret
-```
-
-## How to Run
-
-Start the MCP service:
-
-```bash
-cd "/mnt/c/Users/tuetm/MCP - ICT Project/ICP-Project1/web_server"
-source venv/bin/activate
-make mcp
-```
-
-In a second terminal, start the web app:
-
-```bash
-cd "/mnt/c/Users/tuetm/MCP - ICT Project/ICP-Project1/web_server"
-source venv/bin/activate
-make web
-```
-
-Open:
-
-```text
-http://127.0.0.1:8000
-```
-
-## Example Web App Test Prompts
-
-### File Tools
-
-```text
-Create a file named notes.txt with content hello world
-```
-
-```text
-Read the file notes.txt
-```
-
-```text
-Read the file ../../secret.txt
-```
-
-Expected: blocked for path traversal.
-
-```text
-Create a file named xss.txt with content <script>alert(1)</script>
-```
-
-Expected: blocked before file creation.
-
-### Uploaded File Summarisation
-
-Upload a normal `.txt` file and ask:
-
-```text
-Summarise this uploaded file
-```
-
-Expected: allowed and summarised.
-
-Upload a `.txt` file containing:
-
-```text
-OPENROUTER_API_KEY=sk-test-secret
-```
-
-Then ask:
-
-```text
-Summarise this uploaded file
-```
-
-Expected: blocked before summarisation.
-
-Upload a PDF and ask:
-
-```text
-Summarise this uploaded PDF
-```
-
-Expected: extracted, scanned, and summarised if safe.
-
-Upload an image and ask:
-
-```text
-Describe this uploaded image
-```
-
-Expected: described if the final model output passes the post-call checker.
-
-### Post-Call Demo API Tools
-
-```text
-Run the security demo safe health check
-```
-
-Expected: allowed.
-
-```text
-Call the fake secret API for a post-call demo
-```
-
-Expected: blocked by post-call secret detection.
-
-```text
-Call the fake desktop info API for a post-call demo
-```
-
-Expected: blocked by post-call local data leakage detection.
-
-```text
-Call the fake error status API for a post-call demo
-```
-
-Expected: blocked by suspicious API status detection.
-
-## Running Tests
-
-From `web_server`:
-
-```bash
-source venv/bin/activate
-python3 -B -m unittest tests.test_postcall_security -v
-python3 -B -m unittest tests.test_upload_processing -v
-python3 -B -m unittest tests.test_post_call_audit -v
-```
-
-## Project Structure
-
-```text
+.gitignore
+README.md
 web_server/
+  Makefile
+  main.py                          # Fixed public OAuth callback, sessions, SSE
+  main_mcp.py                      # Parent MCP and middleware
   database/
-    db.py
-    model.py
+    db.py                          # sqlite:///./database.db
+    model.py                       # User record
   mcp_servers/
     admin_server.py
     demo_security_server.py
     local_file_server.py
     weather_http_server.py
+    secrets/                       # Existing demonstration path, not credentials setup
   middleware/
+    __init__.py
     internal_jwt.py
     pre_check.py
     response_check.py
-  pages/
-    home.html
-  security/
-    post_call_audit.py
+  pages/home.html
+  security/post_call_audit.py
   services/
     mcp_host.py
     upload_processing.py
-  tests/
-    test_post_call_audit.py
-    test_postcall_security.py
-    test_upload_processing.py
-  main.py
-  main_mcp.py
-  Makefile
+  database.db                      # Existing tracked runtime database
+  user_workspaces/                  # Existing tracked user content
 ```
 
-## Security Notes
+There is no `tests/` directory in this branch. The older README's `tests.test_postcall_security`, `tests.test_upload_processing`, and `tests.test_post_call_audit` commands do not correspond to committed files and are not valid verification instructions for this snapshot.
 
-This is a prototype for demonstrating MCP security concepts. It is not
-production-ready security software.
+## Installation and deployment prerequisites
 
-Production hardening would require:
+Use Python 3.10+ for the source syntax, pip/venv, and Make. Dependencies are unpinned. The existing Makefile installs FastAPI, Uvicorn, Jinja2, Pydantic, python-dotenv, OpenAI, FastMCP, HTTPX, SQLAlchemy, Authlib, itsdangerous, PyJWT, pypdf, and python-multipart. PDF extraction falls back to PyPDF2 if separately available.
 
-- stronger structured logging and monitoring
-- stricter file type validation
-- OCR scanning before image-to-model calls
-- malware scanning for uploaded files
-- formal threat modelling
-- broader fuzz testing for prompt injection and XSS variants
-- secure deployment and secret management
-
-## Important Files to Exclude from GitHub
-
-Make sure these are included in `.gitignore`:
-
-```gitignore
-.env
-venv/
-__pycache__/
-*.pyc
-database.db
-security/post_call_audit.log
-user_workspaces/
+```bash
+git clone --branch domain_mcp https://github.com/LiBingze33/ICP-Project1.git
+cd ICP-Project1/web_server
+make install
 ```
+
+Supply credentials privately through the process environment or an untracked `web_server/.env`:
+
+| Variable | Purpose/default |
+| --- | --- |
+| `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | GitHub OAuth app registered for `https://9163.syslab.au/auth/callback` |
+| `SESSION_SECRET_KEY` | Strong private cookie-signing key |
+| `INTERNAL_JWT_SECRET` | Strong shared private key for web and MCP processes |
+| `OPENROUTER_API_KEY` | Required when the client is created, even if Ollama is later selected |
+| `OPENROUTER_MODEL` | Optional; `anthropic/claude-sonnet-4.5` |
+| `OLLAMA_BASE_URL` | Optional; `http://127.0.0.1:11434/v1` on the deployment host |
+| `OLLAMA_MODEL` | Optional; `llama3.2` |
+
+`make session-key` generates a random value locally; use separate private session/JWT keys. Run both processes from `web_server`, since database, templates, and workspaces use relative paths:
+
+```bash
+make mcp
+```
+
+```bash
+# In a second terminal in web_server:
+make web
+```
+
+These are the repository's development startup commands, not a complete production deployment procedure. SQLAlchemy creates the user table if absent. Existing tracked runtime files are not required deployment fixtures and should not be reused as private production data. The host must separately provide HTTPS access, the configured domain/callback, appropriate routing to the web process including streaming responses, and process supervision. Its private MCP endpoint should remain internal. Exact infrastructure commands cannot be supplied from this repository.
+
+Opening plain `http://127.0.0.1:8000` is useful for inspecting the page but does not reproduce public login: the callback remains the public URL and the cookie requires HTTPS. Use [local_mcp](https://github.com/LiBingze33/ICP-Project1/tree/local_mcp) for the local workflow. Ollama is an optional separately provisioned service/model on the deployment host; the browser user's machine does not host it for this public application.
+
+## Access and usage
+
+If the service is available, open [https://9163.syslab.au](https://9163.syslab.au), log in with GitHub, select a backend, and submit a message or upload. Try creating/reading `notes.txt`, asking for a US weather forecast with coordinates, summarising a non-sensitive PDF, or running the security demo safe health check. Deletion prompts for consent. Synthetic secret/Desktop/error-status demos are intended to exercise blocking rather than reveal real data. These scenarios were not executed for this documentation update.
+
+## Limitations and sensitive data
+
+This remains a prototype. Regex-based checks are not complete attack prevention. There is no pre-model image OCR, malware scanning, or overall application upload-size limit. OpenRouter receives submitted content when selected; debug console output includes model text and tool arguments and is not equivalent to the sanitised audit log. New users default to `user`; admin access requires an existing administrative database configuration outside the UI.
+
+The `.gitignore` does not cover the already tracked database/workspaces. Do not stage credentials, `.env`, runtime user files, databases, or audit logs into new changes. Their historical presence is not a recommendation to publish personal content. Removing previously exposed data from history or rotating credentials is a separate operation; this README update does not perform either.
+
+Further improvements retained from the original project context include stronger monitoring, stricter file validation, OCR, malware scanning, formal threat modelling, fuzz testing, and deployment secret management. Live HTTPS, OAuth, backend availability, and security scenarios were not tested during this documentation-only task.
+
+## Other project versions
+
+- [main](https://github.com/LiBingze33/ICP-Project1/tree/main): primary portfolio presentation, based on the local implementation without runtime data.
+- [local_mcp](https://github.com/LiBingze33/ICP-Project1/tree/local_mcp): advanced locally hosted implementation with a request-derived callback.
+- [terminal_required](https://github.com/LiBingze33/ICP-Project1/tree/terminal_required): preserved original university terminal/basic-web implementation.
