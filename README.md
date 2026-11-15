@@ -2,13 +2,13 @@
 
 A university project investigating how an AI assistant can use files and external tools through the **Model Context Protocol (MCP)** while applying explicit security controls. The application combines a FastAPI chat interface, GitHub login, database-backed user context, MCP tool policies, and checks around uploaded content, tool results, and final model answers.
 
-The focus is security experimentation and explainable tool execution. This is an educational prototype, not a claim of production-grade attack prevention. This primary branch presents the advanced local implementation; the complete development progression is retained in separate branches.
+The focus is security experimentation and explainable tool execution. This primary branch presents the advanced local implementation; the complete development progression is retained in separate branches.
 
 ## Project background and evolution
 
-The project began with an interactive terminal weather client and a basic web demonstration for the original university assignment. That implementation remains on `terminal_required`, preserving the original `main` history and source. The assignment brief is not committed, so its exact assessment requirements are not inferred here.
+The project began with an interactive terminal weather client and a basic web demonstration for the original university assignment. That implementation remains on `terminal_required`, preserving the original `main` history and source.
 
-The advanced implementation adds GitHub authentication, SQLAlchemy users, per-user workspaces, role-aware policies, service JWTs, upload processing, post-call checks, and audit records. `domain_mcp` adapts the application for the public OAuth callback at `https://9163.syslab.au`. Existing technical explanations about canonicalisation, safe synthetic demos, and prototype limitations are retained and clarified below.
+The advanced implementation adds GitHub authentication, SQLAlchemy users, per-user workspaces, role-aware policies, service JWTs, upload processing, post-call checks, and audit records. `domain_mcp` adapts the application for the public OAuth callback at `https://9163.syslab.au`.
 
 ## Available project versions
 
@@ -19,7 +19,7 @@ The advanced implementation adds GitHub authentication, SQLAlchemy users, per-us
 | [local_mcp](https://github.com/LiBingze33/ICP-Project1/tree/local_mcp) | Advanced locally hosted system | Browser, GitHub OAuth, local web process and parent MCP process |
 | [domain_mcp](https://github.com/LiBingze33/ICP-Project1/tree/domain_mcp) | Advanced public deployment version | Browser access at [9163.syslab.au](https://9163.syslab.au), when available |
 
-`main` copies the application code, dependency declarations, and application layout of `local_mcp`. Intentional differences are this README and exclusion of `web_server/database.db` and all tracked `web_server/user_workspaces/` files. Those are runtime user data, not application source. History is preserved, so their exclusion from the latest tree does not erase earlier commits or copies on other branches.
+`main` shares its application code, dependency declarations, and application layout with `local_mcp`, with a README tailored to the repository homepage. Runtime databases and user workspaces are excluded from Git tracking across the advanced branches.
 
 ## System architecture
 
@@ -55,7 +55,7 @@ Uploaded text/PDF content is decoded or extracted and scanned before model submi
 - **Authenticated web workflow:** GitHub login/logout, signed sessions, SQLite users, and private workspace folders.
 - **File tools:** list, read, create, and delete files using host-injected workspace context; deletion prompts for consent.
 - **Weather tools:** US state alerts and coordinate forecasts through the National Weather Service API.
-- **Role-aware administration:** the host exposes user listing to users whose database role is `admin`; there is no administrative role-editing UI.
+- **Role-aware administration:** the host exposes user listing to users whose database role is `admin`.
 - **Two model backends:** OpenRouter and Ollama, selected in the browser. Defaults are `anthropic/claude-sonnet-4.5` and `llama3.2`; backend/model capabilities still determine tool and vision support.
 - **Uploads:** UTF-8 `.txt`/`.md`, PDF text extraction up to 20,000 characters, and `.png`/`.jpg`/`.jpeg` image description.
 - **Security demonstrations:** synthetic safe/secret/Desktop/error-status tool outputs exercise checks without reading real secrets or Desktop files.
@@ -73,11 +73,7 @@ Uploaded text/PDF content is decoded or extracted and scanned before model submi
 | Output checks | `middleware/response_check.py` canonicalises URL/HTML-encoded forms, normalises whitespace, checks compact XSS structures and secret/injection/error-status/Desktop patterns, and redacts local paths |
 | Audit | `security/post_call_audit.py` records tool, identity, role, duration, status, output size, decision and reason; selected sensitive field names are redacted |
 
-The full `PreCheckMiddleware` class contains additional sensitive-filename, permission, and read-output rules, but is **not mounted** on the MCP servers. Its helper calls are active; the whole middleware pipeline must not be claimed as enabled. Internal JWT checks authenticate the service and do not independently enforce per-tool role authorisation. Host role filtering is the implemented role boundary.
-
-The registered `weather_only_tool` is not in the host's tool policies. `weather_get_user_info` expects FastMCP access-token claims that custom JWT verification does not populate; a working identity lookup through that tool is unverified. These qualifications correct broader claims in earlier documentation without changing code.
-
-Pattern detectors are demonstration controls, not a complete defence against injection or data leakage. Images have no OCR scan before submission; no malware scanner or overall upload-size limit is implemented. Development console logs contain model/tool details and should not be considered sanitised. Audit redaction covers selected keys rather than all possible sensitive strings.
+Input validation runs through shared helpers in the host and upload flows. The standalone pre-check middleware is not registered on the MCP servers. Internal JWTs authenticate the backend service, while the host applies role-based tool permissions.
 
 ## Technology stack
 
@@ -119,11 +115,11 @@ web_server/
     upload_processing.py           # Text/PDF extraction and prompts
 ```
 
-Runtime creates `web_server/database.db`, `web_server/user_workspaces/`, and `web_server/security/post_call_audit.log`. Runtime user data is intentionally absent from this branch's committed tree. The database is created on web startup and user workspace folders on login. There is no `tests/` directory in this implementation.
+Runtime creates `web_server/database.db`, `web_server/user_workspaces/`, and `web_server/security/post_call_audit.log`. These are ignored by Git. The database is created on web startup and user workspace folders on login.
 
 ## Installation and local setup
 
-Prerequisites: Python 3.10+ for the source syntax, pip/venv, Make, a GitHub OAuth application, and an OpenRouter API key. Dependencies and Python are not pinned in this branch. Ollama is an optional separate service. These instructions follow the checked source and Makefile; this documentation update did not install or run the advanced application.
+Prerequisites: Python 3.10+, pip/venv, Make, a GitHub OAuth application, and an OpenRouter API key. Dependencies and Python are not pinned in this branch. Ollama is an optional separate service.
 
 ```bash
 git clone https://github.com/LiBingze33/ICP-Project1.git
@@ -162,15 +158,15 @@ venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000 \
 
 Register the matching HTTPS origin and `/auth/callback` in the GitHub OAuth app, such as `https://127.0.0.1:8000/auth/callback` if that is your certificate's origin. The local implementation derives the callback from the request URL. Certificate provisioning is not included in the repository. These are runtime options, not changes to the application's security configuration.
 
-Open that local HTTPS URL, log in, and select a backend. Try creating and reading a non-sensitive `notes.txt`, deleting it through the consent prompt, requesting US weather with coordinates, or uploading a document for summarisation. The security demo health check is a benign example; synthetic secret/Desktop/error tools demonstrate intended blocking. These examples describe intended manual checks, not passing test results.
+Open that local HTTPS URL, log in, and select a backend. Try creating and reading a non-sensitive `notes.txt`, deleting it through the consent prompt, requesting US weather with coordinates, or uploading a document for summarisation. The security demo health check is a benign example; synthetic secret/Desktop/error tools demonstrate post-call checking.
 
-Keep `.env`, credentials, databases, workspace uploads, and logs out of commits. The inherited `.gitignore` ignores `.env`, environments, bytecode, and security logs, but does not ignore runtime databases/workspaces; review explicit staged paths carefully. Their exclusion from this commit is not an ongoing ignore rule.
+Keep credentials in the environment or a private `.env`. The `.gitignore` covers `.env`, virtual environments, bytecode, security logs, the runtime database, and user workspaces.
 
 ## Public deployment
 
 [domain_mcp](https://github.com/LiBingze33/ICP-Project1/tree/domain_mcp) targets **[https://9163.syslab.au](https://9163.syslab.au)**. Visitors use the hosted browser application and GitHub login without starting local services. If Ollama is selected there, it refers to the deployment server's model service, not the visitor's computer.
 
-The verified public-specific application change is the fixed OAuth callback `https://9163.syslab.au/auth/callback`. Both advanced branches retain Secure cookies, the same web/MCP default ports, SQLite users, tool policies, and security pipeline. Source differences also include comments/line endings, an audit-module annotations import, and runtime data. Neither branch contains the actual TLS/reverse-proxy or hosting configuration; no specific infrastructure or stronger public-only protection is inferred. Service availability was not checked for this documentation update.
+The public version uses the fixed OAuth callback `https://9163.syslab.au/auth/callback`. Both advanced versions share Secure cookies, the same web/MCP default ports, SQLite users, tool policies, and security workflow. Public TLS, reverse-proxy, and hosting configuration are managed outside this repository. Current service availability has not been verified.
 
 ## Version comparison
 
@@ -183,6 +179,10 @@ The verified public-specific application change is the fixed OAuth callback `htt
 | Security scope | Basic allowlists and argument checks | Host policies, internal JWT, active input checks, output scanning and audits | Same implemented controls |
 | Uploads | No summarisation workflow | TXT/MD/PDF summaries and supported image descriptions | Same upload workflow |
 | Callback | No OAuth | Derived from request URL | Fixed public domain callback |
-| Runtime data in latest tree | Original demonstration content preserved | Excluded on `main`; existing tracked data retained on `local_mcp` | Existing tracked runtime data retained |
+| Runtime data in latest tree | Original demonstration content preserved | Database and user workspaces excluded from Git | Database and user workspaces excluded from Git |
 
-The prior public README referenced automated tests absent from its branch. No automated test suite or production deployment specification is committed in the advanced versions. Remaining work includes stronger file validation, OCR before model submission, malware scanning, monitoring, formal threat modelling, fuzz testing, and deployment secret management. These are limitations and future directions, not implemented features.
+## Security Scope & Future Improvements
+
+This university prototype demonstrates layered controls around AI tool use, combining host policies, service authentication, input validation helpers, output scanning, and audit logging.
+
+Future improvements include full pre-check middleware integration, broader automated security testing, stronger upload validation and size limits, OCR before image submission, and deployment monitoring. Use non-sensitive demonstration content: OpenRouter receives submitted content when selected, and images are scanned through their model-generated descriptions.
